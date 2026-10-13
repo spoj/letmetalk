@@ -3,8 +3,6 @@ use std::io;
 use futures::future::BoxFuture;
 
 /// What a peer connection reports. Channels are numbered by letmetalk; channel 0 is the control channel.
-/// On wasm nothing constructs these until the browser backend lands in step 4.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) enum Event {
     Candidate(String),
     Connected,
@@ -37,9 +35,4 @@ pub(crate) trait Peer: Send + Sync {
 pub(crate) use crate::native::peer;
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn peer(
-    _ice: &[crate::IceServer],
-    _relay_only: bool,
-) -> BoxFuture<'static, io::Result<std::sync::Arc<dyn Peer>>> {
-    unimplemented!("the browser backend is step 4")
-}
+pub(crate) use crate::web::peer;

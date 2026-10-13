@@ -243,7 +243,13 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>, ip: IpAddr, _slot: Sl
             }
             Some(down) = inbox.recv() => Message::Binary(down.encode().into()),
             _ = renew.tick() => Message::Binary(Down::Ice(shared.ice(&key)).encode().into()),
-            _ = ping.tick() => Message::Ping(Vec::new().into()),
+            _ = ping.tick() => {
+                // Browsers answer pings without showing them to JS, so the client counts `Alive` as traffic.
+                if !send(&mut socket, Message::Ping(Vec::new().into())).await {
+                    break;
+                }
+                Message::Binary(Down::Alive.encode().into())
+            }
             _ = &mut silent => break,
             _ = &mut kicked => {
                 send(&mut socket, Message::Binary(Down::Replaced.encode().into())).await;
