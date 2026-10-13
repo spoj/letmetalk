@@ -549,6 +549,29 @@ mod tests {
     }
 
     #[test]
+    fn negated_key_dials_as_negated_key() {
+        let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
+        let mut negated = alice.public().to_bytes();
+        negated[31] ^= 0x80;
+        let payload = OfferPayload {
+            key: negated.into(),
+            sent_ms: NOW,
+            ek: fresh_ek(),
+            sdp: "x".into(),
+        };
+        let msg1 = message1(
+            alice.x25519_secret(),
+            Box::new(DefaultResolver),
+            &bob.public(),
+            &payload,
+        );
+        let offer = Offer::receive(&bob, &Replay::default(), &msg1, NOW).unwrap();
+        assert_eq!(offer.dialer.to_bytes(), negated);
+        assert_ne!(offer.dialer, alice.public());
+        assert_eq!(offer.dialer.x25519(), alice.public().x25519());
+    }
+
+    #[test]
     fn message1_without_secret_fails() {
         let bob = SecretKey::generate();
         let mut identity = [0; 32];
