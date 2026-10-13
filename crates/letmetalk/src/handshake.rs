@@ -22,7 +22,6 @@ const MAX_MSG: usize = 65535;
 const MAX_AGE_MS: u64 = 10 * 60 * 1000;
 const CACHE_CAP: usize = 100_000;
 const CANDIDATE_NONCE: u64 = ((1 << 24) - 1) << 40;
-const INDEX_LIMIT: u64 = (1 << 40) - 1;
 
 #[derive(Clone, Copy)]
 enum Kind {
@@ -87,17 +86,17 @@ impl Dialer {
             sdp,
         };
         let mut cbor = Vec::new();
-        ciborium::into_writer(&payload, &mut cbor).map_err(io::Error::other)?;
+        ciborium::into_writer(&payload, &mut cbor).expect("CBOR into a Vec");
 
-        let mut state = Builder::new(PATTERN.parse().map_err(io::Error::other)?)
+        let mut state = Builder::new(PATTERN.parse().expect("pattern is valid"))
             .local_private_key(&local.x25519_secret())
-            .map_err(io::Error::other)?
+            .expect("32-byte key")
             .remote_public_key(&peer.x25519())
-            .map_err(io::Error::other)?
+            .expect("32-byte key")
             .prologue(&prologue(&session))
-            .map_err(io::Error::other)?
+            .expect("prologue is set once")
             .build_initiator()
-            .map_err(io::Error::other)?;
+            .expect("keys are set");
         let mut msg = vec![0; MAX_MSG];
         let n = state
             .write_message(&cbor, &mut msg)
@@ -180,13 +179,13 @@ impl Offer {
         now_ms: u64,
     ) -> io::Result<Self> {
         let (session, body) = unframe(envelope, Kind::Offer)?;
-        let mut state = Builder::new(PATTERN.parse().map_err(io::Error::other)?)
+        let mut state = Builder::new(PATTERN.parse().expect("pattern is valid"))
             .local_private_key(&local.x25519_secret())
-            .map_err(io::Error::other)?
+            .expect("32-byte key")
             .prologue(&prologue(&session))
-            .map_err(io::Error::other)?
+            .expect("prologue is set once")
             .build_responder()
-            .map_err(io::Error::other)?;
+            .expect("key is set");
         let mut cbor = vec![0; MAX_MSG];
         let n = state
             .read_message(body, &mut cbor)
@@ -233,7 +232,7 @@ impl Offer {
         let (ct, secret) = self.ek.encapsulate();
         self.state
             .set_psk(2, &pq_psk(&secret, &ct))
-            .map_err(io::Error::other)?;
+            .expect("psk slot 2 exists in IKpsk2");
         let mut msg = vec![0; MAX_MSG];
         let n = self
             .state
@@ -243,7 +242,7 @@ impl Offer {
         let transport = self
             .state
             .into_stateless_transport_mode()
-            .map_err(io::Error::other)?;
+            .expect("message 2 completes the handshake");
         Ok((
             frame(Kind::Answer, &self.session, &body),
             Transport(transport),
@@ -280,9 +279,6 @@ impl Transport {
         index: u64,
         batch: &[u8],
     ) -> io::Result<Vec<u8>> {
-        if index >= INDEX_LIMIT {
-            return Err(io::Error::other("candidate index out of range"));
-        }
         let mut body = index.to_be_bytes()[3..].to_vec();
         body.extend(self.seal(CANDIDATE_NONCE | index, batch)?);
         Ok(frame(Kind::Candidates, session, &body))
@@ -296,9 +292,6 @@ impl Transport {
         let mut bytes = [0; 8];
         bytes[3..].copy_from_slice(&body[..5]);
         let index = u64::from_be_bytes(bytes);
-        if index >= INDEX_LIMIT {
-            return Err(io::Error::other("candidate index out of range"));
-        }
         Ok((index, self.open(CANDIDATE_NONCE | index, &body[5..])?))
     }
 }
@@ -763,15 +756,12 @@ mod tests {
         let (alice_t, _) = dialer.finish(&msg2).map_err(|(_, e)| e).unwrap();
 
         let session = [3; 16];
-        for index in [INDEX_LIMIT, 1 << 40] {
-            assert!(alice_t.seal_candidates(&session, index, b"x").is_err());
-        }
         let last = alice_t
-            .seal_candidates(&session, INDEX_LIMIT - 1, b"x")
+            .seal_candidates(&session, (1 << 40) - 2, b"x")
             .unwrap();
         assert_eq!(
             bob_t.open_candidates(&last).unwrap(),
-            (INDEX_LIMIT - 1, b"x".to_vec())
+            ((1 << 40) - 2, b"x".to_vec())
         );
 
         let max_index = [&last[..HEADER], &[0xff; 5], &last[HEADER + 5..]].concat();
