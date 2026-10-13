@@ -207,12 +207,16 @@ impl Peer for Native {
         })
     }
 
-    /// Closes once SCTP has acknowledged what was sent: webrtc-rs's close can overtake data still in flight.
+    /// Closes once SCTP has acknowledged what was sent: webrtc-rs's close can overtake data still in flight. A peer
+    /// that never acknowledges is given up on after 10 s.
     fn close_channel(&self, channel: u32) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             if let Ok(dc) = self.shared.channel(channel) {
-                while dc.outstanding_bytes().await.is_ok_and(|n| n > 0) {
-                    sleep(Duration::from_millis(1)).await;
+                for _ in 0..400 {
+                    if !dc.outstanding_bytes().await.is_ok_and(|n| n > 0) {
+                        break;
+                    }
+                    sleep(Duration::from_millis(25)).await;
                 }
                 let _ = dc.close().await;
             }

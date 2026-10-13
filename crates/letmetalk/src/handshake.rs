@@ -87,11 +87,10 @@ impl Dialer {
     pub(crate) fn dial(
         local: &SecretKey,
         peer: &PublicKey,
+        session: [u8; 16],
         sent_ms: u64,
         sdp: String,
     ) -> io::Result<(Self, Vec<u8>)> {
-        let mut session = [0; 16];
-        getrandom::fill(&mut session).expect("OS randomness");
         let (decaps, encaps) = MlKem768::generate_keypair();
         let payload = OfferPayload {
             key: local.public().to_bytes().into(),
@@ -405,7 +404,9 @@ mod tests {
     const TEN_MIN: u64 = MAX_AGE_MS;
 
     fn dial(from: &SecretKey, to: &SecretKey, sent_ms: u64) -> (Dialer, Vec<u8>) {
-        Dialer::dial(from, &to.public(), sent_ms, "offer".into()).unwrap()
+        let mut session = [0; 16];
+        getrandom::fill(&mut session).unwrap();
+        Dialer::dial(from, &to.public(), session, sent_ms, "offer".into()).unwrap()
     }
 
     fn fresh_ek() -> ByteArray<KEM_EK> {

@@ -539,7 +539,7 @@ mod tests {
         let a = SecretKey::generate();
         let b = SecretKey::generate();
         let mut replay = Replay::default();
-        let (dialer, msg1) = Dialer::dial(&a, &b.public(), now_ms(), "offer".into()).unwrap();
+        let (dialer, msg1) = Dialer::dial(&a, &b.public(), [1; 16], now_ms(), "offer".into()).unwrap();
         let offer = Offer::receive(&b, &replay, &msg1, now_ms()).unwrap();
         let (msg2, accepter) = offer.answer(&mut replay, now_ms(), "answer").unwrap();
         let (dialed, _) = dialer.finish(&msg2).map_err(|(_, e)| e).unwrap();

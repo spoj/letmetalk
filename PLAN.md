@@ -289,8 +289,8 @@ impl WsSignal {  // feature "ws"
 ### Streams
 
 - **Channels.** Each stream is one data channel, reliable and ordered, opened in band (DCEP).
-  - Native closes wait until SCTP has acknowledged what was sent. webrtc-rs's close can overtake data still in flight,
-    so the peer then loses the final `Finish`.
+  - Native closes wait until SCTP has acknowledged what was sent, for at most 10 s. webrtc-rs's close can overtake data
+    still in flight, so the peer then loses the final `Finish`.
   - Streams open only once the link is confirmed. That also avoids a webrtc-rs bug: a channel the answering side opens
     just after ICE connects, before SCTP is up, never opens.
   - A browser opener writes at once. A native opener waits for the peer's DCEP ack.
