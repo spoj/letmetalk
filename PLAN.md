@@ -233,8 +233,10 @@ impl WsSignal {  // feature "ws"
   - It creates the control channel (`letmetalk/1`, negotiated with id 0, so no in-band open is needed) and an offer.
   - The offer goes in message 1 at once, with no candidates.
   - Once the dialer has read message 2, its candidates follow in batches every 50 ms until gathering ends.
-  - On native, letmetalk lists interfaces itself and binds only physical ones, skipping docker, veth and bridges.
-    webrtc-rs's interface filter is stored but never read.
+  - On native, letmetalk lists interfaces itself (`netdev`) and binds only up, physical ones, skipping docker, veth and
+    bridges, one socket per address (IPv6 link-local excluded). With no such address, it binds loopback, so peers on
+    one machine still connect. webrtc-rs's interface filter is stored but never read.
+    Each channel's send buffer is capped at 1 MiB.
   - The accepter:
     - drops anything it cannot open;
     - applies `admit`, and a refusal gets no reply;
