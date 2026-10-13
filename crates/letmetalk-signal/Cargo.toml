@@ -1,0 +1,25 @@
+[package]
+name = "letmetalk-signal"
+description = "Forwarder for letmetalk's signaling envelopes, which also issues TURN credentials"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+hex = "0.4"
+getrandom = "0.4"
+hmac = "0.12"
+letmetalk = { path = "../letmetalk", features = ["ws"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+sha1 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time", "fs"] }
+
+[dev-dependencies]
+futures = "0.3"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }

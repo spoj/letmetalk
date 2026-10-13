@@ -142,6 +142,8 @@ impl WsSignal {  // feature "ws"
     pub fn new(url: &str, key: &SecretKey) -> WsSignal;
 }
 ```
+- `letmetalk::ws::wire` (feature `ws`) is public, so that `letmetalk-signal` shares the frames and the login with the
+  client. It is not part of the stable API.
 
 - **Admission rules.**
   - `admit` is checked when a link forms. Once a key is refused, its link closes at its next incoming stream.
@@ -381,16 +383,22 @@ it later.
     and `send` fails with `NotConnected`. Otherwise it reconnects after 2 s.
 - **TURN credentials.**
   - The login's reply carries the ICE servers, with TURN credentials in the TURN REST form, valid for 24 h.
-  - The username is `expiry:token`, with a random 128-bit token per login. The forwarder keeps token→key in memory to
-    attribute usage. TURN sends usernames in the clear, so a key would put identities on the wire.
-  - Credentials are minted from a secret the forwarder shares with coturn, and renewed every 12 h over the socket.
-  - Full credentials go only to allowlisted keys. Others get a small quota. A stranger dialing a member needs no TURN
-    of its own, since the member's relay candidate reaches it.
-- **coturn hardening.** The trial's coturn runs with `denied-peer-ip` for loopback, private, link-local and cloud
-  metadata ranges, plus `no-multicast-peers`, `user-quota` and `max-bps`. Without these, a peer's candidates could aim
-  the TURN server at internal addresses (the known TURN SSRF class).
-- **One login per key.** A new login replaces the old one. The replaced socket is told so, and `WsSignal` does not
-  reconnect it, so two processes with one key don't evict each other in a loop.
+  - Two coturn instances, each with its own secret. `member` gives full credentials to members: the keys on the
+    allowlist, or every key when there is none. `stranger` gives everyone else a small quota: low `user-quota`,
+    `total-quota` and `max-bps`. Under REST auth coturn can't tell users apart, so the quota is per instance. A
+    stranger that logs in again gets a fresh token and so a fresh per-user quota; `total-quota` bounds the instance.
+  - A stranger dialing a member needs no TURN of its own, since the member's relay candidate reaches it.
+  - The username is `expiry:token`, with a random 128-bit token (hex) per login. The forwarder keeps token→key in
+    memory to attribute usage (`Forwarder::key_of`), and drops entries at expiry. TURN sends usernames in the clear, so
+    a key would put identities on the wire.
+  - The password is base64 of HMAC-SHA1 over the username, under the secret of the instance it is for. The forwarder
+    shares that secret with coturn. Credentials are renewed every 12 h over the socket.
+- **coturn hardening.** `crates/letmetalk-signal/coturn/member.conf` and `stranger.conf` are the trial's coturn configs,
+  without secrets. Both deny peers in loopback, private, link-local, shared-address, multicast and cloud-metadata ranges,
+  and set `no-multicast-peers`. `stranger.conf` adds the quotas. Without these, a peer's candidates could aim the TURN
+  server at internal addresses (the known TURN SSRF class).
+- **One login per key.** A new login replaces the old one. The replaced socket is sent `5` and closed, and `WsSignal`
+  does not reconnect it, so two processes with one key don't evict each other in a loop.
 - **Frames.** Integers are big-endian.
   - Client to server: `id (u32) ‖ to (32) ‖ envelope`.
   - Server to client:
@@ -406,8 +414,12 @@ it later.
     8 KiB + 36 bytes.
 - **Limits.**
   - Envelopes of up to 8 KiB. An offer or answer is about 3 KB, ML-KEM included.
-  - Rates per login, per socket and per IP, sized in step 3 from a measured startup of an endpoint dialing 20 peers.
-  - An optional allowlist of keys. Senders outside it get a lower rate of envelopes to any one recipient.
+  - Token-bucket rates, provisional constants in `lib.rs` until a measured startup of an endpoint dialing 20 peers can
+    size them (that needs step 2's `Endpoint`):
+    - per login, which is per socket: 50/s, burst 200;
+    - per IP: 200/s, burst 800;
+    - for a non-member only, per recipient: 1/s, burst 5.
+  - Over a limit the sender gets `3`.
   - Nothing is stored.
 - **Presence.** `2 ‖ id` tells any logged-in key whether another key is online. Run with an allowlist to keep that
   among known keys. Embedded in letmeknow's service, it would forward only between members of a group.
@@ -565,9 +577,9 @@ Each step lands with its tests and keeps the checks in AGENTS.md green.
    - an offline recipient;
    - limits;
    - a new login replacing an old one;
-   - two endpoints connecting through it.
+   - two endpoints connecting through it. Skipped: it needs step 2's `Endpoint`.
 
-   The limits are sized here.
+   The limits are provisional here, sized once step 2 exists.
 4. **Browser backend and wasm `WsSignal`.** wasm-bindgen tests in headless Chromium, run in CI:
    - browser↔browser within one page;
    - browser↔native through a forwarder the test starts.
