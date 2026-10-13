@@ -225,10 +225,6 @@ impl Offer {
         if replay.order.len() >= CACHE_CAP {
             return Err(io::Error::other("replay cache full"));
         }
-        replay.seen.insert(self.session);
-        replay
-            .order
-            .push_back((now_ms + 2 * MAX_AGE_MS, self.session));
         let (ct, secret) = self.ek.encapsulate();
         self.state
             .set_psk(2, &pq_psk(&secret, &ct))
@@ -243,6 +239,10 @@ impl Offer {
             .state
             .into_stateless_transport_mode()
             .expect("message 2 completes the handshake");
+        replay.seen.insert(self.session);
+        replay
+            .order
+            .push_back((now_ms + 2 * MAX_AGE_MS, self.session));
         Ok((
             frame(Kind::Answer, &self.session, &body),
             Transport(transport),
@@ -664,6 +664,20 @@ mod tests {
         }
         let (_, ok) = dial(&alice, &bob, NOW);
         assert!(Offer::receive(&bob, &replay, &ok, NOW).is_ok());
+        assert!(replay.seen.is_empty());
+    }
+
+    #[test]
+    fn failed_answer_leaves_cache_empty() {
+        let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
+        let (_, msg1) = dial(&alice, &bob, NOW);
+        let mut replay = Replay::default();
+        let offer = Offer::receive(&bob, &replay, &msg1, NOW).unwrap();
+        assert!(
+            offer
+                .answer(&mut replay, NOW, &"x".repeat(MAX_MSG))
+                .is_err()
+        );
         assert!(replay.seen.is_empty());
     }
 
