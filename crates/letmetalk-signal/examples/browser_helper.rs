@@ -41,6 +41,18 @@ async fn main() {
     let signal = WsSignal::new(&format!("ws://127.0.0.1:{port}/ws"), &key);
     let endpoint = Endpoint::new(key.clone(), signal, |_| Admit::Direct);
     println!("{}", key.public());
+    let browser = SecretKey::from_bytes([0x43; 32]).public();
+    let dialer = endpoint.clone();
+    tokio::spawn(async move {
+        let mut stream = loop {
+            match dialer.connect(browser, "ping").await {
+                Ok(stream) => break stream,
+                Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+            }
+        };
+        stream.write_all(b"ping").await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
     loop {
         let mut stream = endpoint.accept().await.expect("the endpoint runs until killed");
         tokio::spawn(async move {

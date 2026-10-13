@@ -624,7 +624,7 @@ Each step lands with its tests and keeps the checks in AGENTS.md green.
    `scripts/browser-tests.sh`. The script starts a forwarder and a native echo endpoint on loopback, and builds the tests
    with their URL and key in `LETMETALK_TEST_SIGNAL` and `LETMETALK_TEST_ECHO`.
    - browser↔browser within one page, with 8 MiB one way, and a relayed dial with no relay forms no link;
-   - browser↔native through the forwarder;
+   - browser↔native through the forwarder, in both directions;
    - a plain `ws://` to a remote host is refused.
 5. **Bench** (`crates/bench`): a native binary and a browser page. They:
    - echo, time setup, and measure bulk throughput and latency under load;

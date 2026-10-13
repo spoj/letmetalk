@@ -125,18 +125,39 @@ async fn relayed_dial_without_a_relay_forms_no_link() {
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
 }
 
-#[wasm_bindgen_test]
-async fn browser_dials_native_echo_through_the_forwarder() {
-    let key = SecretKey::generate();
-    let signal = Arc::new(WsSignal::new(env!("LETMETALK_TEST_SIGNAL"), &key));
+/// Waits until the forwarder has logged the carrier in, which gives it ICE servers.
+async fn logged_in(signal: &WsSignal) {
     within(async {
         while signal.ice_servers().is_empty() {
             sleep(Duration::from_millis(10)).await;
         }
     })
     .await;
+}
+
+#[wasm_bindgen_test]
+async fn browser_dials_native_echo_through_the_forwarder() {
+    let key = SecretKey::generate();
+    let signal = Arc::new(WsSignal::new(env!("LETMETALK_TEST_SIGNAL"), &key));
+    logged_in(&signal).await;
     let dialer = Endpoint::new(key, Forwarded(signal), |_| Admit::Direct);
     dial_and_echo(&dialer, echo_key()).await;
+}
+
+/// The helper dials this key, so the browser accepts a stream whose offer came from webrtc-rs.
+#[wasm_bindgen_test]
+async fn browser_accepts_a_native_dial_through_the_forwarder() {
+    let key = SecretKey::from_bytes([0x43; 32]);
+    let signal = Arc::new(WsSignal::new(env!("LETMETALK_TEST_SIGNAL"), &key));
+    logged_in(&signal).await;
+    let accepter = Endpoint::new(key, Forwarded(signal), |_| Admit::Direct);
+    let mut stream = within(accepter.accept()).await.expect("a stream");
+    assert_eq!(stream.remote_key(), echo_key());
+    assert_eq!(stream.protocol(), "ping");
+    let mut buf = [0; 4];
+    stream.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"ping");
+    accepter.close().await;
 }
 
 #[wasm_bindgen_test]
