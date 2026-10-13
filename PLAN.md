@@ -330,9 +330,11 @@ impl WsSignal {  // feature "ws"
     - Every stream starts with 16 KiB of credit on both sides, with no message. Only `Data` bytes count; `Open` is
       not counted, and its protocol name is at most 255 bytes.
     - The reader grants more: up to 16 KiB until the app accepts a stream, then up to 1 MiB, and more as the app reads.
-    - It never has more than the link's budget granted at once: 4 MiB for a Direct link, 256 KiB for a Relayed one.
+      A grant goes out only once it is at least 16 KiB, so small reads don't flood the control channel.
+    - Each stream keeps its first 16 KiB outside the budget, so every stream can always progress. Above that, streams
+      share the link's budget: 4 MiB for a Direct link, 256 KiB for a Relayed one.
   - **Enforcement.** The sender never sends past its credit. A message past it fails the link, so what a peer can make
-    an endpoint hold is bounded by its link's budget.
+    an endpoint hold is bounded by budget + 16 KiB × open streams. A peer whose credit would pass 1 MiB fails the link.
   - **On native,** the sender also caps each channel's send buffer and waits on `writable()`. webrtc-rs's
     `OnBufferedAmountLow` proved unreliable: it fired with 3 MB still queued.
   - **Draining.** Every stream's unread data stays within its window, so letmetalk always drains the link at once.

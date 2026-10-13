@@ -12,7 +12,7 @@ use n0_future::task::spawn;
 use crate::backend::{Event, Peer};
 use crate::handshake::Transport;
 use crate::keys::PublicKey;
-use crate::stream::{Io, Stream};
+use crate::stream::{Io, IoState, Stream};
 
 pub(crate) const CONTROL: u32 = 0;
 const LAST: u32 = (1 << 24) - 1;
@@ -296,6 +296,9 @@ impl Mux {
             Plain::Credit(n, bytes) => {
                 if let Some(io) = st.streams.get(&n).cloned() {
                     let mut s = io.state();
+                    if s.credit + bytes as usize > ACCEPTED_CREDIT {
+                        return Err(io::Error::other("credit past the window"));
+                    }
                     s.credit += bytes as usize;
                     if let Some(waker) = s.write_waker.take() {
                         waker.wake();
@@ -451,9 +454,11 @@ impl Mux {
         spawn(async move { peer.close_channel(n).await });
     }
 
-    /// Grants credit to each stream, up to its window and the link's budget.
+    /// Grants credit to each stream. Each keeps its first 16 KiB outside the budget; above that, streams share what
+    /// the link's budget has free. A grant goes out only once the shortfall is a full chunk.
     fn grant(&self, st: &mut State) {
-        let used: usize = st.streams.values().map(|io| io.state().outstanding()).sum();
+        let above = |s: &IoState| s.outstanding().saturating_sub(FIRST_CREDIT);
+        let used: usize = st.streams.values().map(|io| above(&io.state())).sum();
         let mut free = self.budget.saturating_sub(used);
         for (&n, io) in &st.streams {
             let mut s = io.state();
@@ -461,10 +466,15 @@ impl Mux {
                 continue;
             }
             let want = if s.accepted { ACCEPTED_CREDIT } else { FIRST_CREDIT };
-            let grant = want.saturating_sub(s.outstanding()).min(free);
+            if want.saturating_sub(s.outstanding()) < CHUNK {
+                continue;
+            }
+            let floor = FIRST_CREDIT.saturating_sub(s.outstanding());
+            let extra = want.saturating_sub(s.outstanding() + floor).min(free);
+            free -= extra;
+            let grant = floor + extra;
             if grant > 0 {
                 s.granted += grant;
-                free -= grant;
                 let _ = self.control.unbounded_send(Plain::Credit(n, grant as u32));
             }
         }
@@ -526,6 +536,7 @@ mod tests {
     use crate::keys::SecretKey;
 
     const BUDGET: usize = 4 << 20;
+    const RELAYED_BUDGET: usize = 256 << 10;
     const MIB: usize = 1 << 20;
 
     fn now_ms() -> u64 {
@@ -566,6 +577,7 @@ mod tests {
     /// A dialer mux (A) and an accepter mux (B) over a fake pair. Both sides are served.
     struct Pair {
         a: Arc<Mux>,
+        b: Arc<Mux>,
         a_peer: Arc<dyn Peer>,
         b_peer: Arc<dyn Peer>,
         accepts: UnboundedReceiver<Stream>,
@@ -574,13 +586,17 @@ mod tests {
     }
 
     fn pair() -> Pair {
+        pair_with(BUDGET)
+    }
+
+    fn pair_with(budget: usize) -> Pair {
         let (ta, tb) = transports();
         let (pa, pb) = fake::pair();
-        let a = Mux::new(pa.clone(), ta, SecretKey::generate().public(), true, BUDGET);
-        let b = Mux::new(pb.clone(), tb, SecretKey::generate().public(), false, BUDGET);
+        let a = Mux::new(pa.clone(), ta, SecretKey::generate().public(), true, budget);
+        let b = Mux::new(pb.clone(), tb, SecretKey::generate().public(), false, budget);
         let (_, a_task) = serve(a.clone(), pa.clone());
         let (accepts, b_task) = serve(b.clone(), pb.clone());
-        Pair { a, a_peer: pa, b_peer: pb, accepts, a_task, b_task }
+        Pair { a, b, a_peer: pa, b_peer: pb, accepts, a_task, b_task }
     }
 
     /// Sends a message on stream `n` from A as the dialer would, sealed at `index`.
@@ -730,6 +746,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credit_past_the_window_fails_the_link() {
+        let p = pair();
+        let _a = p.a.open("greedy").await.unwrap();
+        let sealed = p.b.transport.seal(0, &Plain::Credit(2, ACCEPTED_CREDIT as u32 + 1).encode()).unwrap();
+        p.b_peer.send(CONTROL, sealed).await.unwrap();
+        assert!(p.a_task.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
     async fn unaccepted_stream_takes_16_kib_then_waits_for_accept() {
         let mut p = pair();
         let mut a = p.a.open("slow").await.unwrap();
@@ -785,6 +810,33 @@ mod tests {
         drop(b);
         let err = writer.await.unwrap().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+    }
+
+    #[tokio::test]
+    async fn stalled_stream_on_a_relayed_link_does_not_starve_another() {
+        let mut p = pair_with(RELAYED_BUDGET);
+        let mut stalled = p.a.open("stalled").await.unwrap();
+        let mut live = p.a.open("live").await.unwrap();
+        let b_stalled = p.accepts.next().await.unwrap();
+        let mut b_live = p.accepts.next().await.unwrap();
+        b_stalled.accept();
+        b_live.accept();
+        let flood = spawn(async move { stalled.write_all(&vec![3; 4 * MIB]).await });
+        let send = spawn(async move {
+            live.write_all(&vec![5; 256 * 1024]).await.unwrap();
+            live
+        });
+        let mut buf = vec![0; 256 * 1024];
+        n0_future::time::timeout(Duration::from_secs(2), b_live.read_exact(&mut buf))
+            .await
+            .expect("the live stream got 256 KiB in 2 s")
+            .unwrap();
+        send.await.unwrap();
+        let held: usize = p.b.state.lock().unwrap().streams.values().map(|io| io.state().outstanding()).sum();
+        assert!(held <= RELAYED_BUDGET + 2 * FIRST_CREDIT, "receiver granted {held} bytes");
+        assert!(!flood.is_finished());
+        drop(b_stalled);
+        assert_eq!(flood.await.unwrap().unwrap_err().kind(), io::ErrorKind::ConnectionReset);
     }
 
     #[tokio::test]
