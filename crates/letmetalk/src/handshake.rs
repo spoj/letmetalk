@@ -307,7 +307,90 @@ impl Transport {
 mod tests {
     use super::*;
     use crate::keys::torsioned;
+    use ed25519_dalek::VerifyingKey;
+    use snow::Error;
+    use snow::params::{CipherChoice, DHChoice, HashChoice};
     use snow::resolvers::{CryptoResolver, DefaultResolver};
+    use snow::types::{Cipher, Dh, Hash, Random};
+
+    /// The private key of a message 1 forged with no secret, whose public key the resolver replaces.
+    const FORGED_STATIC: [u8; 32] = [42; 32];
+
+    /// Resolves a snow initiator whose static key is sent as `static_u` and whose ephemeral key is zero,
+    /// with every DH output zero, so that message 1 carries no secret.
+    struct NoSecret([u8; 32]);
+
+    struct NoSecretDh {
+        inner: Box<dyn Dh>,
+        static_u: [u8; 32],
+        forged: Option<[u8; 32]>,
+    }
+
+    impl Dh for NoSecretDh {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+        fn pub_len(&self) -> usize {
+            32
+        }
+        fn priv_len(&self) -> usize {
+            32
+        }
+        fn set(&mut self, privkey: &[u8]) {
+            self.inner.set(privkey);
+            if privkey == FORGED_STATIC {
+                self.forged = Some(self.static_u);
+            }
+        }
+        fn generate(&mut self, rng: &mut dyn Random) -> Result<(), Error> {
+            self.inner.generate(rng)?;
+            self.forged = Some([0; 32]);
+            Ok(())
+        }
+        fn pubkey(&self) -> &[u8] {
+            match &self.forged {
+                Some(u) => u,
+                None => self.inner.pubkey(),
+            }
+        }
+        fn privkey(&self) -> &[u8] {
+            self.inner.privkey()
+        }
+        fn dh(&self, pubkey: &[u8], out: &mut [u8]) -> Result<(), Error> {
+            if self.forged.is_some() {
+                out.fill(0);
+                Ok(())
+            } else {
+                self.inner.dh(pubkey, out)
+            }
+        }
+    }
+
+    impl CryptoResolver for NoSecret {
+        fn resolve_rng(&self) -> Option<Box<dyn Random>> {
+            DefaultResolver.resolve_rng()
+        }
+        fn resolve_dh(&self, choice: &DHChoice) -> Option<Box<dyn Dh>> {
+            Some(Box::new(NoSecretDh {
+                inner: DefaultResolver.resolve_dh(choice)?,
+                static_u: self.0,
+                forged: None,
+            }))
+        }
+        fn resolve_hash(&self, choice: &HashChoice) -> Option<Box<dyn Hash>> {
+            DefaultResolver.resolve_hash(choice)
+        }
+        fn resolve_cipher(&self, choice: &CipherChoice) -> Option<Box<dyn Cipher>> {
+            DefaultResolver.resolve_cipher(choice)
+        }
+    }
+
+    fn montgomery(ed: [u8; 32]) -> [u8; 32] {
+        VerifyingKey::from_bytes(&ed)
+            .unwrap()
+            .to_montgomery()
+            .to_bytes()
+    }
 
     const NOW: u64 = 1_800_000_000_000;
     const TEN_MIN: u64 = MAX_AGE_MS;
@@ -466,8 +549,8 @@ mod tests {
     }
 
     #[test]
-    fn small_order_and_torsioned_claimed_keys_fail() {
-        let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
+    fn message1_without_secret_fails() {
+        let bob = SecretKey::generate();
         let mut identity = [0; 32];
         identity[0] = 1;
         for claimed in [identity, [0; 32], torsioned()] {
@@ -477,12 +560,8 @@ mod tests {
                 ek: fresh_ek(),
                 sdp: "x".into(),
             };
-            let msg1 = message1(
-                alice.x25519_secret(),
-                Box::new(DefaultResolver),
-                &bob.public(),
-                &payload,
-            );
+            let resolver = NoSecret(montgomery(claimed));
+            let msg1 = message1(FORGED_STATIC, Box::new(resolver), &bob.public(), &payload);
             assert!(Offer::receive(&bob, &Replay::default(), &msg1, NOW).is_err());
         }
     }
