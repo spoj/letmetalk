@@ -70,11 +70,9 @@ pub(crate) struct Dialer {
 }
 
 impl Dialer {
-    /// `claimed` is the key the offer says it comes from; only tests set it to anything else.
     pub(crate) fn dial(
         local: &SecretKey,
         peer: &PublicKey,
-        claimed: [u8; 32],
         sent_ms: u64,
         sdp: String,
     ) -> io::Result<(Self, Vec<u8>)> {
@@ -82,7 +80,7 @@ impl Dialer {
         getrandom::fill(&mut session).expect("OS randomness");
         let (decaps, encaps) = MlKem768::generate_keypair();
         let payload = OfferPayload {
-            key: claimed.into(),
+            key: local.public().to_bytes().into(),
             sent_ms,
             ek: ByteArray::new(encaps.to_bytes().into()),
             sdp,
@@ -288,13 +286,43 @@ impl Transport {
 mod tests {
     use super::*;
     use crate::keys::torsioned;
+    use snow::resolvers::{CryptoResolver, DefaultResolver};
 
     const NOW: u64 = 1_800_000_000_000;
     const TEN_MIN: u64 = MAX_AGE_MS;
 
     fn dial(from: &SecretKey, to: &SecretKey, sent_ms: u64) -> (Dialer, Vec<u8>) {
-        let claimed = from.public().to_bytes();
-        Dialer::dial(from, &to.public(), claimed, sent_ms, "offer".into()).unwrap()
+        Dialer::dial(from, &to.public(), sent_ms, "offer".into()).unwrap()
+    }
+
+    fn fresh_ek() -> ByteArray<KEM_EK> {
+        ByteArray::new(MlKem768::generate_keypair().1.to_bytes().into())
+    }
+
+    /// Message 1 written by snow itself, so that a test chooses the payload and the DH keys.
+    fn message1(
+        local: [u8; 32],
+        resolver: Box<dyn CryptoResolver + Send>,
+        peer: &PublicKey,
+        payload: &OfferPayload,
+    ) -> Vec<u8> {
+        let mut session = [0; 16];
+        getrandom::fill(&mut session).unwrap();
+        let mut cbor = Vec::new();
+        ciborium::into_writer(payload, &mut cbor).unwrap();
+        let mut state = Builder::with_resolver(PATTERN.parse().unwrap(), resolver)
+            .local_private_key(&local)
+            .unwrap()
+            .remote_public_key(&peer.x25519())
+            .unwrap()
+            .prologue(&prologue(&session))
+            .unwrap()
+            .build_initiator()
+            .unwrap();
+        let mut msg = vec![0; MAX_MSG];
+        let n = state.write_message(&cbor, &mut msg).unwrap();
+        msg.truncate(n);
+        frame(Kind::Offer, &session, &msg)
     }
 
     fn answered(from: &SecretKey, to: &SecretKey) -> (Dialer, Vec<u8>, Vec<u8>) {
@@ -389,14 +417,18 @@ mod tests {
             SecretKey::generate(),
             SecretKey::generate(),
         );
-        let (_, msg1) = Dialer::dial(
-            &alice,
+        let payload = OfferPayload {
+            key: carol.public().to_bytes().into(),
+            sent_ms: NOW,
+            ek: fresh_ek(),
+            sdp: "x".into(),
+        };
+        let msg1 = message1(
+            alice.x25519_secret(),
+            Box::new(DefaultResolver),
             &bob.public(),
-            carol.public().to_bytes(),
-            NOW,
-            "x".into(),
-        )
-        .unwrap();
+            &payload,
+        );
         assert!(Offer::receive(&bob, &mut Replay::default(), &msg1, NOW).is_err());
     }
 
@@ -406,7 +438,18 @@ mod tests {
         let mut identity = [0; 32];
         identity[0] = 1;
         for claimed in [identity, [0; 32], torsioned()] {
-            let (_, msg1) = Dialer::dial(&alice, &bob.public(), claimed, NOW, "x".into()).unwrap();
+            let payload = OfferPayload {
+                key: claimed.into(),
+                sent_ms: NOW,
+                ek: fresh_ek(),
+                sdp: "x".into(),
+            };
+            let msg1 = message1(
+                alice.x25519_secret(),
+                Box::new(DefaultResolver),
+                &bob.public(),
+                &payload,
+            );
             assert!(Offer::receive(&bob, &mut Replay::default(), &msg1, NOW).is_err());
         }
     }
