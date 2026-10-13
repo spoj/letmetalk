@@ -1,0 +1,13 @@
+#!/bin/sh
+# Splits letmeknow's cached ACME PEM (key, then chain) into /etc/letmetalk/tls, and restarts our units if it changed.
+set -eu
+src=$(ls -t /var/lib/letmeknow/acme/cached_cert_* | head -n 1)
+dst=/etc/letmetalk/tls
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' "$src" > "$tmp/cert.pem"
+sed -n '/-----BEGIN [A-Z ]*PRIVATE KEY-----/,/-----END [A-Z ]*PRIVATE KEY-----/p' "$src" > "$tmp/key.pem"
+if cmp -s "$tmp/cert.pem" "$dst/cert.pem" && cmp -s "$tmp/key.pem" "$dst/key.pem"; then exit 0; fi
+install -m 0640 -o root -g letmetalk "$tmp/cert.pem" "$dst/cert.pem"
+install -m 0640 -o root -g letmetalk "$tmp/key.pem" "$dst/key.pem"
+systemctl restart letmetalk-turn@member letmetalk-turn@stranger letmetalk-forwarder

@@ -1,0 +1,18 @@
+[Unit]
+Description=letmetalk-signal: envelope forwarder and TURN credentials
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=letmetalk
+EnvironmentFile=/etc/letmetalk/forwarder.env
+ExecStart=/usr/local/bin/letmetalk-signal --listen [::]:8443 --host relay.letmeknow.dev --tls-cert /etc/letmetalk/tls/cert.pem --tls-key /etc/letmetalk/tls/key.pem --member-turn turn:relay.letmeknow.dev:3478?transport=udp --member-turn turn:relay.letmeknow.dev:3478?transport=tcp --member-turn turns:relay.letmeknow.dev:5349?transport=tcp --stranger-turn turn:relay.letmeknow.dev:3479?transport=udp --stranger-turn turn:relay.letmeknow.dev:3479?transport=tcp --stranger-turn turns:relay.letmeknow.dev:5350?transport=tcp --allowlist /etc/letmetalk/allowlist
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Copy letmeknow's renewed ACME certificate to letmetalk
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/letmetalk-tls-sync

@@ -1,0 +1,9 @@
+[Unit]
+Description=Copy letmeknow's renewed ACME certificate to letmetalk daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

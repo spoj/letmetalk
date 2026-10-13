@@ -1,0 +1,17 @@
+[Unit]
+Description=coturn for letmetalk, %i instance
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=letmetalk
+ExecStart=/usr/bin/turnserver -c /etc/letmetalk/coturn/%i.conf --pidfile=/dev/null
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
