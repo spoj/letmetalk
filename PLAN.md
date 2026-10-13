@@ -1,10 +1,13 @@
 # letmetalk: dial a key over WebRTC
 
-Draft 2, for review.
-- **Changes since draft 1:**
-  - the owner's decisions: webrtc-rs, streams only, the guarantees below, these thresholds, and a throwaway VM;
-  - the review's findings;
-  - the validation's corrections.
+Draft 3, for review.
+- **Changes since draft 2:** the second review's findings and the second validation's corrections.
+- **Owner's decisions so far:**
+  - webrtc-rs;
+  - streams only;
+  - the guarantees below;
+  - these thresholds;
+  - letmeknow's VPS for the real-world runs.
 - **What this is:** the contract for a trial. letmetalk is a small library that connects to an Ed25519 public key over
   WebRTC, natively and in browsers. The trial's measurements decide whether letmeknow moves its networking onto it.
 - letmeknow does not change during the trial.
@@ -38,20 +41,34 @@ What letmetalk promises, whatever app uses it and whichever WebRTC stack carries
 3. **Forward secret and post-quantum.** Everything after the dialer's first message uses keys made from both X25519 and
    ML-KEM-768. That covers streams, the answer and later candidates. Recorded traffic stays closed even if a key is
    stolen later, or a quantum computer arrives later.
-4. **Deniable.** letmetalk signs nothing. No message it sends proves to a third party who talked to whom, and neither
-   does a forwarder login.
+4. **Deniable.** letmetalk signs nothing, and neither does a forwarder login. So a record of a session proves nothing
+   to a third party about who talked to whom.
+   - The limit, which no design avoids: a peer or forwarder that colludes with a third party while the session happens
+     can convince that party.
 5. **Addresses only to admitted keys.**
    - Peers learn this endpoint's IP addresses only if `admit` says `Direct`. With `Relayed`, they see only TURN's.
-   - The carrier sees no addresses.
+   - Envelopes carry no addresses. The forwarder does see the IP address each key connects from.
 
 Not promised:
 - **Metadata.**
   - The carrier sees who signals whom, when, and how much.
-  - A forwarder also knows who is logged in.
+  - From envelope sizes and counts, the carrier can tell an answer from a silent refusal, and a direct link from a
+    relayed one.
+  - A forwarder also knows who is logged in, and from which IP address.
+  - Any key logged in to a forwarder can ask whether another key is online, unless the forwarder runs an allowlist.
   - TURN servers see both ends' addresses and how much they send.
+- **Traffic shape.** Encryption hides what streams carry, not how many there are, their sizes or their timing. Anyone
+  who breaks a link's DTLS sees that. So would a later quantum attack on recorded DTLS 1.2.
+- **Delivery.** A sender is not told what arrived. A reader sees a stream cut short as a reset, but a stream that never
+  arrived is invisible to it.
 - **Availability.** A carrier can drop or delay signaling, so links may fail to form.
-- **The first message.** The dialer's first message carries its key, its offer and its first candidates. It is
-  protected by X25519 only: it is not post-quantum, and not forward secret if the recipient's key is stolen later.
+- **The first exchange.**
+  - The dialer's first message is protected by X25519 only: it is not post-quantum, and not forward secret if the
+    recipient's key is stolen later. It carries the dialer's key and the send time, which the forwarder knows anyway,
+    plus session parameters that are worthless once the session ends. No addresses travel in it.
+  - Until the dialer's `Hello` arrives, the accepter's answer and candidates are only weakly forward secret (Noise
+    §7.5). An attacker who already holds the accepter's key can pose as the dialer, and could read them if it later
+    steals the dialer's key too.
 - **Post-quantum authentication.** Authentication only has to hold while a link forms, so it matters only once quantum
   attacks run live.
 - **Healing.** If a live link's keys leak, that link stays exposed until it ends. Every new link starts afresh.
@@ -134,6 +151,7 @@ impl WsSignal {  // feature "ws"
   - `NotConnected`: the carrier itself is down.
   - `PermissionDenied`: `admit` refuses the key.
   - `TimedOut`: no link formed within 15 s. A refusal looks the same, since refusals are silent.
+  - `ResourceBusy`: no new link fits, because every link at the cap holds streams.
   - `ConnectionReset`: the stream, or its link, died, was reset, or failed to decrypt.
 - **Streams.** Dropping a stream without finishing it resets it. To refuse an unknown protocol, the accepter drops the
   stream.
@@ -153,31 +171,53 @@ impl WsSignal {  // feature "ws"
   - IK fits keys as addresses: the dialer knows the peer's key, and the peer learns the dialer's from message 1.
 - **Static keys.**
   - Both sides' Ed25519 keys are mapped to X25519 (`SigningKey::to_scalar_bytes`, `VerifyingKey::to_montgomery`).
-  - letmetalk itself only ever does X25519 with the key, though apps may also sign with it. eprint 2021/509 shows that
-    Ed25519 signing and an X25519 KEM can share a key. The outside review (Risks) covers Noise's static-key use.
+  - letmetalk itself only ever does X25519 with the key, in Noise and in the forwarder login, though apps may also sign
+    with it. eprint 2021/509 shows that Ed25519 signing and an X25519 KEM can share a key. It does not cover those two
+    uses, so the outside review (Risks) does.
   - Message 1 carries the dialer's Ed25519 key, and the peer checks that it maps to the dialer's Noise static key.
-  - Small-order keys are refused.
+  - letmetalk refuses keys of small order (`is_weak`) or with a torsion part, in the handshake and in the forwarder
+    login. snow checks neither: in the validation, a forger with no secret at all completed a handshake with a
+    small-order key.
+  - One secret then still passes as two Ed25519 keys, A and −A, which map to the same X25519 key. Per-key limits
+    therefore count the X25519 key. Holding A's secret already gives −A, so nobody else is exposed.
+  - snow does not check ephemeral keys either, but a bad one only weakens its sender's own session.
 - **Post-quantum.**
   - The dialer puts a fresh ML-KEM-768 encapsulation key in message 1.
-  - The peer encapsulates to it, puts the shared secret in Noise's PSK slot before writing message 2, and sends the
-    ciphertext beside message 2.
-  - So every key after message 1 mixes X25519 and ML-KEM. This is how Rosenpass makes WireGuard post-quantum through
-    the same slot, except that here the exchange rides inside the handshake's two messages.
+  - The peer encapsulates to it and sends the ciphertext beside message 2.
+  - Before writing message 2, it puts `BLAKE2s(letmetalk/1 pq ‖ shared secret ‖ ciphertext)` in Noise's PSK slot,
+    which binds the ciphertext into the handshake as PQNoise and Rosenpass do. snow allows setting the PSK mid-handshake.
+  - So every key after message 1 mixes X25519 and ML-KEM. Rosenpass makes WireGuard post-quantum through the same slot,
+    with two differences:
+    - Rosenpass runs its own exchange beforehand, with static post-quantum keys, so its PSK also protects message 1
+      and authenticates.
+    - Here the PSK comes from a fresh exchange inside the handshake, and protects only what follows message 1.
 - **Envelopes.** `version (1) ‖ kind (1) ‖ session id (16) ‖ body`. The session id is chosen at random by the dialer.
   - `Offer`: Noise message 1. Its payload (CBOR) holds:
     - the dialer's Ed25519 key;
     - the send time (Unix ms);
     - the ML-KEM encapsulation key;
-    - the offer SDP.
+    - the offer SDP, without candidates.
   - `Answer`: the ML-KEM ciphertext, then Noise message 2. Its payload holds the answer SDP.
-  - `Candidates`: an index (8 bytes), then candidates sealed with the session keys (see Streams for nonces). Either
-    side sends these once it holds those keys: the peer after writing message 2, the dialer after reading it.
-- **What the carrier sees:** the recipient, the session id, and each envelope's kind, size and time. It does not see
-  the dialer's key (Noise encrypts it), any address, or any SDP. A forwarder does know the dialer from its login.
+  - `Candidates`: an index (5 bytes, below 2⁴⁰−1), then candidates sealed with the session keys (see Streams for
+    nonces). Each side sends these once it holds those keys: the peer after writing message 2, the dialer after reading
+    it.
+- **Nothing for a forger.**
+  - The peer's answer and candidates are sealed to the dialer's live ephemeral and static keys.
+  - The dialer's candidates come only after message 2, sealed with keys that need both of those.
+  - So a replayed message 1, or one forged with a stolen copy of the peer's key, learns nothing and draws no ICE checks
+    from the peer's addresses.
+  - Holding the dialer's candidates back costs about one carrier leg, against the 100 ms the offer no longer waits.
+- **What the carrier sees:**
+  - the recipient, the session id, and each envelope's kind, size and time;
+  - for a forwarder, also each sender (from its login), and so both ends of every session.
+
+  It never sees an address inside an envelope, or any SDP.
 - **Freshness.**
   - A message 1 more than 10 minutes old or ahead is dropped and logged.
-  - So is one whose session id was seen within that window.
-  - Answers count only for a session in progress.
+  - So is one whose session id was seen within that window. Session ids enter that cache only once their message 1
+    opens, so forged envelopes cannot fill it.
+  - Answers count only for a session in progress. A garbled answer is dropped, and the dialer keeps waiting: snow
+    keeps its state after a failed read.
   - Candidates are idempotent, so a replayed one does no harm.
 - **Libraries:** snow (RustCrypto resolver) and ml-kem (RustCrypto). Both build for wasm32.
 - **Why not HPKE envelopes and signatures:** they would be neither deniable nor forward secret for the answer.
@@ -190,21 +230,23 @@ impl WsSignal {  // feature "ws"
   - The dialer creates a peer connection with the carrier's ICE servers, plus the relay-only policy if `admit` says
     `Relayed`.
   - It creates the control channel (`letmetalk/1`, negotiated with id 0, so no in-band open is needed) and an offer.
-  - The offer, carrying the candidates gathered within 100 ms, goes in message 1.
-  - Later candidates follow in batches every 50 ms until gathering ends, once the dialer holds the session keys. On
-    native, virtual interfaces (docker, veth, bridges) are skipped.
+  - The offer goes in message 1 at once, with no candidates.
+  - Once the dialer has read message 2, its candidates follow in batches every 50 ms until gathering ends.
+  - On native, letmetalk lists interfaces itself and binds only physical ones, skipping docker, veth and bridges.
+    webrtc-rs's interface filter is stored but never read.
   - The accepter:
     - drops anything it cannot open;
     - applies `admit`, and a refusal gets no reply;
     - does the same with an answer in message 2, then its own candidates.
   - Candidates that arrive early are held until they can be applied.
-- **Confirmation.**
-  - Once the control channel opens, each side sends `Hello` on it, encrypted with the session keys. The link is up when
-    the peer's `Hello` opens.
-  - A peer without the session keys cannot produce one. That includes a key holder M that tries to pass A's offer to B
-    as its own, and B's answer back to A, so that A and B connect directly, each believing it reached M (identity
-    misbinding).
-  - Streams wait for confirmation.
+- **Confirmation.** Once the control channel opens, each side sends `Hello` on it, encrypted with the session keys. The
+  link is up when the peer's `Hello` opens. It has two jobs:
+  - Nothing waits on an unconfirmed link: neither streams, nor the replacement of an older link.
+  - From the dialer, `Hello` is the first message that proves the dialer even to a peer whose own key was stolen.
+    Noise IK's message 1 can't do that.
+
+  Relaying two peers' offer and answer between them (identity misbinding) gets nowhere: the two ends would hold
+  different keys, so nothing between them opens.
 - **Crossed offers.** If offers cross between two keys, the link offered by the smaller key survives. Pending
   `connect`s move to it.
 - **Replacement.**
@@ -222,31 +264,46 @@ impl WsSignal {  // feature "ws"
 
   There is no idle timer, so a new stream never races an idle close. The trial has no ICE restart: a network change
   ends the link, and the app reconnects.
-- **Limits.**
-  - 256 links. At the cap, the least recently used link with no streams is evicted.
-  - One link in setup per key that this endpoint did not dial. A newer offer replaces it.
-  - 16 such links in all. When that pool is full, the oldest unconfirmed one is evicted.
+- **Limits.** Relayed keys (strangers, in letmeknow) are kept apart, so that they cannot crowd out admitted ones.
+  - 256 links in all, of which at most 64 are Relayed.
+  - At a cap, the least recently used link with no streams in the same class is evicted. If none is free, `connect`
+    fails with `ResourceBusy`, and offers get no reply.
+  - One link in setup per key that this endpoint did not dial. A newer offer replaces it only if its authenticated send
+    time is later.
+  - Inbound setups: 16 Direct and 8 Relayed. When a class is full, its oldest unconfirmed setup is evicted, so Relayed
+    offers never evict Direct ones.
   - An unconfirmed inbound link is dropped after 10 s.
+  - The handshake itself costs little: a few X25519 operations and one ML-KEM encapsulation. What these limits bound is
+    the peer connection, its gathering and its TURN allocation, which each offer costs.
 
 ### Streams
 
 - **Channels.** Each stream is one data channel, reliable and ordered, opened in band (DCEP).
   - Streams open only once the link is confirmed. That also avoids a webrtc-rs bug: a channel the answering side opens
-    between ICE connecting and SCTP coming up never opens.
+    just after ICE connects, before SCTP is up, never opens.
   - A browser opener writes at once. A native opener waits for the peer's DCEP ack.
-  - At most 128 streams are open per link in each direction; further opens are reset.
+  - At most 128 streams are open per link in each direction, and at most 16 wait for `accept`. Further opens are reset.
 - **Numbers.** Streams are numbered by letmetalk, not by channel id, since webrtc-rs's `id()` is only a local handle.
-  - The link's dialer opens even numbers and its accepter odd ones. Numbers are never reused on a link.
+  - The link's dialer opens even numbers and its accepter odd ones. Numbers are never reused on a link, and an open
+    past 2²³ streams from one side fails.
   - Stream 0 is the control channel. Number 2²⁴−1 is reserved for `Candidates` envelopes.
   - The DCEP label carries the number. The protocol name travels encrypted in the stream's first message, which also
     sidesteps web-sys having no getter for a channel's protocol.
+  - **Checks on each open by the peer.** The number must:
+    - have the peer's parity;
+    - be neither 0 nor 2²⁴−1;
+    - never have been seen on this link.
+
+    A sliding window over the highest number seen (1,024 wide, as DTLS does for records in RFC 6347) enforces the last.
+    Any failure fails the link. Without these checks, someone who broke DTLS could re-open a used number and replay its
+    messages, and our replies would reuse nonces.
 - **Encryption.**
   - Every message on every channel, the control channel included, is sealed with ChaCha20-Poly1305 under the session
     key of its direction.
   - Its nonce is the stream's number (24 bits) and the message's index on that stream (40 bits). Channels deliver in
     order and lose nothing, so the nonce is implicit.
   - A replayed, reordered, dropped or moved message fails to open, and fails its stream.
-  - Since numbers are never reused, no nonce repeats under a key. A link that runs out of numbers is replaced.
+  - Since numbers are never reused, and the peer's are checked, no nonce repeats under a key.
 - **Messages.** Plaintexts start with a type:
   - on a stream: `Open(protocol)` (the first message), `Data`, `Finish`;
   - on the control channel: `Hello`, `Credit(stream, bytes)`, `Reset(stream)`.
@@ -255,13 +312,18 @@ impl WsSignal {  // feature "ws"
   Data channels have no half-close, so `Finish` stands in for one, and a channel closes once both sides have finished.
 - **Flow control.** SCTP has one receive window per link, not one per stream (RFC 9260). So on native, one slow reader
   would stall every stream, the control channel included. And browsers deliver messages as events, with no back-pressure
-  at all. So each stream gets its own window:
-  - The reader grants 256 KiB of credit, and grants more as the app reads.
-  - The sender never sends past its credit.
-  - On native, the sender also caps each channel's send buffer and waits on `writable()`, because webrtc-rs's
+  at all. So each stream gets its own window, under a budget for its link:
+  - **Credit.**
+    - The reader grants a stream 16 KiB of credit until the app accepts it, enough for `Open` and a first message.
+    - From then on it grants up to 1 MiB, and more as the app reads.
+    - It never has more than the link's budget granted at once: 4 MiB for a Direct link, 256 KiB for a Relayed one.
+  - **Enforcement.** The sender never sends past its credit. A message past it fails the link, so what a peer can make
+    an endpoint hold is bounded by its link's budget.
+  - **On native,** the sender also caps each channel's send buffer and waits on `writable()`. webrtc-rs's
     `OnBufferedAmountLow` proved unreliable: it fired with 3 MB still queued.
-  - Every stream's unread data stays within its window, so letmetalk always drains the link at once, and memory is
-    bounded on both targets.
+  - **Draining.** Every stream's unread data stays within its window, so letmetalk always drains the link at once.
+  - **Throughput limit.** A window caps a stream at window ÷ RTT. 1 MiB covers about 80 Mbit/s at 100 ms; quinn's
+    default is 1.25 MB. The bench records whether a run was limited by its window.
 - **Reset.** A reset sends `Reset`, then closes the channel. The reader discards what it holds and fails with
   `ConnectionReset`.
 
@@ -290,7 +352,9 @@ impl WsSignal {  // feature "ws"
   - The browser runs ICE, DTLS and SCTP. letmetalk adds the handshake, encryption, flow control and link management.
   - Browsers expose `RTCPeerConnection` in windows, not in workers. letmeknow's node already runs in the window.
   - web-sys lacks a few getters (`pc.sctp`) and `restartIce`. `js_sys::Reflect` reaches them if needed.
-  - On wasm, snow and ml-kem need `getrandom` with its `wasm_js` feature.
+  - On wasm:
+    - snow runs with its default features off, since they pull in ring and getrandom 0.2, which fail there.
+    - snow uses getrandom 0.3 and ml-kem uses 0.4. Both need the `wasm_js` feature.
 - **Shared link logic.** The link logic is written once, over the two backends. Spawning and timers go through
   n0-future.
 - **Node and Deno** have no WebRTC. Agents use the native build, as now.
@@ -302,17 +366,24 @@ it later.
 
 - **Login, deniable.**
   - The server sends a fresh X25519 key.
-  - The client answers with its Ed25519 key and a MAC: keyed BLAKE2s over `letmetalk-signal/1 ‖ host`, with the key
-    being the Diffie–Hellman of the client's X25519-mapped key and the server's fresh key.
-  - The server checks the MAC with its side of the same Diffie–Hellman. That proves the key to the server, and to
-    nobody else, since the server could have computed the MAC itself.
+  - The client answers with its Ed25519 key and a MAC: keyed BLAKE2s over `letmetalk-signal/1 ‖ host`. The MAC key is
+    derived, through a labelled KDF, from the Diffie–Hellman of the client's X25519-mapped key and the server's fresh
+    key.
+  - The server checks the MAC with its side of the same Diffie–Hellman. A record of the login proves nothing to
+    anyone else, since the server could have computed the MAC itself.
   - The host is in the MAC, so a login cannot be relayed to another server. All-zero Diffie–Hellman results are
     refused.
+  - `WsSignal` connects over `wss://` only, except to loopback.
 - **TURN credentials.**
-  - The login's reply carries the ICE servers, with TURN credentials in the TURN REST form (username `expiry:key`,
-    valid for 24 h).
-  - They are minted from a secret the forwarder shares with coturn, and renewed every 12 h over the socket.
-  - So coturn can attribute usage to keys, and refuse anyone without a login.
+  - The login's reply carries the ICE servers, with TURN credentials in the TURN REST form, valid for 24 h.
+  - The username is `expiry:token`, with a random 128-bit token per login. The forwarder keeps token→key in memory to
+    attribute usage. TURN sends usernames in the clear, so a key would put identities on the wire.
+  - Credentials are minted from a secret the forwarder shares with coturn, and renewed every 12 h over the socket.
+  - Full credentials go only to allowlisted keys. Others get a small quota. A stranger dialing a member needs no TURN
+    of its own, since the member's relay candidate reaches it.
+- **coturn hardening.** The trial's coturn runs with `denied-peer-ip` for loopback, private, link-local and cloud
+  metadata ranges, plus `no-multicast-peers`, `user-quota` and `max-bps`. Without these, a peer's candidates could aim
+  the TURN server at internal addresses (the known TURN SSRF class).
 - **One login per key.** A new login replaces the old one. The replaced socket is told so, and `WsSignal` does not
   reconnect it, so two processes with one key don't evict each other in a loop.
 - **Frames.**
@@ -327,7 +398,7 @@ it later.
 - **Limits.**
   - Envelopes of up to 8 KiB. An offer or answer is about 3 KB, ML-KEM included.
   - Rates per login, per socket and per IP, sized in step 3 from a measured startup of an endpoint dialing 20 peers.
-  - An optional allowlist of keys.
+  - An optional allowlist of keys. Senders outside it get a lower rate of envelopes to any one recipient.
   - Nothing is stored.
 - **Presence.** `2 ‖ id` tells any logged-in key whether another key is online. Run with an allowlist to keep that
   among known keys. Embedded in letmeknow's service, it would forward only between members of a group.
@@ -345,8 +416,9 @@ to measure:
 - 256 MiB with memory.
 
 Throughput comes first: in the validation, a single 4 MiB burst between two webrtc-rs peers on loopback ran at only
-3–18 MB/s. If that holds, the spike also measures str0m, whose SCTP is a separate crate (sctp-proto, against
-webrtc-rs's rtc-sctp). If webrtc-rs fails here, the plan switches to str0m before step 1.
+3–18 MB/s. If that holds, the spike also measures str0m. Its SCTP is a separate crate (sctp-proto), but a
+sibling of webrtc-rs's rtc-sctp by the same lead developer, so the two may share a flaw. If webrtc-rs fails here, the
+plan switches to str0m before step 1.
 
 ### Measurements
 
@@ -404,11 +476,16 @@ Pairs and baselines:
 Real-world runs use the owner's devices:
 - a laptop on home Wi-Fi;
 - a phone on mobile data (behind carrier-grade NAT), in Chrome and Safari;
-- a cloud VM;
+- letmeknow's VPS;
 - one restrictive network, if one is available.
 
-The forwarder and coturn for these runs go on a separate small VM, not letmeknow's server. It is made for step 7 and
-deleted afterwards. Each pair runs both letmetalk and iroh.
+The forwarder and coturn for these runs go on letmeknow's VPS, beside `serve`; it is pre-alpha, so sharing it is
+fine.
+- `serve` holds 443, so coturn takes 3478 (UDP and TCP) and 5349 (TLS), and the forwarder its own TLS port. The VPS
+  firewall opens those ports for the trial.
+- TURN over TLS on 443 is therefore tested only in the lab.
+
+Each pair runs both letmetalk and iroh.
 
 ### Decision
 
@@ -421,7 +498,7 @@ The criteria:
   - cold: at most 1 s at the median and 3 s at the 95th percentile;
   - warm: at most two RTTs plus 10 ms. One RTT is the native opener's DCEP ack.
 - **Latency under load:** at most one RTT plus 100 ms at the 95th percentile, on the WAN profile.
-- **Throughput,** with letmetalk's encryption on, as always:
+- **Throughput,** with letmetalk's encryption on, as always, on the LAN and WAN profiles:
   - native↔native reaches at least half of iroh's;
   - pairs with a browser reach at least 50 Mbit/s on the LAN profile, and beat today's iroh-relay path on the WAN
     profile.
@@ -444,28 +521,34 @@ Each step lands with its tests and keeps the checks in AGENTS.md green.
 0. **Spike,** throwaway (above).
 1. **Keys and handshake,** with CI: native clippy and tests, and wasm32 clippy. Tests:
    - a full handshake, with the ML-KEM secret in the PSK slot;
-   - a tampered message 1, message 2 and ML-KEM ciphertext;
+   - a tampered message 1, message 2 and ML-KEM ciphertext (the ciphertext is bound through the PSK);
    - a message 1 for the wrong key;
    - a message 1 whose Ed25519 key does not map to its Noise static key;
    - a replayed, stale and future message 1;
-   - small-order keys;
-   - `Candidates` envelopes replayed and out of order.
+   - forged message 1s, which must not enter the replay cache;
+   - small-order static keys;
+   - `Candidates` envelopes replayed and out of order, and indexes of 2⁴⁰ or more.
 2. **Native links and streams** over an in-memory carrier on loopback, with the stream layer also run over a fake
    backend. Tests:
    - echo, and finishing in each direction;
    - a replayed, reordered, dropped or moved message fails its stream;
+   - a peer opening a used number, a number of our parity, 0 or 2²⁴−1 fails the link;
+   - a peer sending past its credit fails the link; streams not yet accepted get 16 KiB; the accept queue holds 16;
    - a reset during a 1 MiB backlog;
    - crossed connects;
    - replacement, which a held-back or replayed offer cannot cause;
    - each `admit` outcome, including a key refused after its link formed;
-   - an offline peer, a timeout, and eviction at the cap;
+   - an offline peer, a timeout, eviction at the cap, and `ResourceBusy` when nothing can be evicted;
+   - a flood of Relayed offers from fresh keys, which evicts no Direct setup or link;
    - the stream cap;
    - identity misbinding: a key holder relaying two peers' offer and answer as its own gets no link;
    - a stalled reader on one stream while another stream and the control channel keep moving;
    - 256 MiB to a slow reader, in bounded memory.
 3. **`letmetalk-signal` and native `WsSignal`.** Tests:
    - login with a bad MAC, a wrong host and an all-zero Diffie–Hellman;
-   - TURN credentials, against a coturn the test starts;
+   - `ws://` refused except to loopback;
+   - TURN credentials against a coturn the test starts: tokens, not keys, in usernames; the small quota for keys
+     outside the allowlist; a peer address in a private range refused;
    - routing and its acks;
    - an offline recipient;
    - limits;
@@ -510,7 +593,11 @@ Not in the trial:
 - **Our own protocol.**
   - The Noise pattern, the ML-KEM secret in the PSK slot and the nonce layout are ours to get right. The primitives
     come from snow and RustCrypto, not from us.
-  - Before adoption, the protocol gets a written specification and an outside review.
+  - The long-term key does X25519 in two places: Noise (`es`, `se`, `ss`) and the forwarder login, with a point the
+    server chooses. eprint 2021/509 covers neither.
+  - Deniability rests on reasoning, not on a formal analysis: nothing is signed, and the recipient could have forged any
+    message 1 itself. The Noise specification makes no deniability claim.
+  - Before adoption, the protocol gets a written specification and an outside review that covers all of this.
 - **Double encryption.** Every message is encrypted by letmetalk and again by DTLS. The bench measures what that costs,
   above all in wasm.
 - **webrtc-rs in peer-to-peer use.** It has one lead maintainer, and its 0.21 rewrite is weeks old: 0.21.1 fixed lost
@@ -528,4 +615,5 @@ Not in the trial:
 - **TURN.**
   - Relay bandwidth moves from iroh-relay to coturn. Most of today's relay traffic is browsers, though, and letmetalk
     aims to make them direct.
-  - A relayed link dies when its 24-hour credentials expire, until ICE restart exists.
+  - A relayed link may die when its 24-hour credentials expire, until ICE restart exists. The lab's run with 5-minute
+    credentials shows whether it does.
