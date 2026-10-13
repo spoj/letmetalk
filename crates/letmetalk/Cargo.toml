@@ -7,22 +7,20 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-ws = ["dep:rustls", "dep:tokio-tungstenite", "dep:webpki-roots", "dep:x25519-dalek", "tokio/macros", "tokio/rt", "tokio/sync", "tokio/time"]
+ws = ["dep:http", "dep:rustls", "dep:tokio-tungstenite", "dep:webpki-roots", "dep:x25519-dalek"]
 
 [dependencies]
 blake2 = "0.10"
 ciborium = "0.2.2"
 ed25519-dalek = "3"
 futures = "0.3"
+http = { version = "1", optional = true }
 getrandom = "0.4"
 hex = "0.4"
 ml-kem = { version = "0.3", features = ["getrandom", "zeroize"] }
 n0-future = "0.3"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
-webpki-roots = { version = "1", optional = true }
 x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
 snow = { version = "0.10", default-features = false, features = ["use-chacha20poly1305", "use-blake2", "use-curve25519", "use-getrandom"] }
 tokio = { version = "1", default-features = false }
@@ -31,6 +29,9 @@ tokio = { version = "1", default-features = false }
 async-trait = "0.1"
 bytes = "1"
 netdev = "0.46"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"], optional = true }
+webpki-roots = { version = "1", optional = true }
 webrtc = "0.21.1"
 
 [dev-dependencies]
@@ -39,3 +40,7 @@ tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "ti
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
 getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+js-sys = "0.3"
+send_wrapper = "0.6"
+wasm-bindgen = "0.2.129"
+web-sys = { version = "0.3.106", features = ["BinaryType", "MessageEvent", "WebSocket"] }
