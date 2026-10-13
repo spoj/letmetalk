@@ -223,6 +223,7 @@ impl WsSignal {  // feature "ws"
   - Answers count only for a session in progress. A garbled answer is dropped, and the dialer keeps waiting: snow
     keeps its state after a failed read.
   - Candidates are idempotent, so a replayed one does no harm.
+  - An offer whose session id is already in progress is refused, so it cannot take over that session's routing.
 - **Libraries:** snow (RustCrypto resolver) and ml-kem (RustCrypto). Both build for wasm32.
 - **Why not HPKE envelopes and signatures:** they would be neither deniable nor forward secret for the answer.
   One Noise handshake gives authentication, deniability, forward secrecy after message 1, and resistance to
