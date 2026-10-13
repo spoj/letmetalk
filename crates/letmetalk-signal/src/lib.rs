@@ -21,7 +21,7 @@ use limit::{Bucket, Rate, take_keyed};
 use sha1::Sha1;
 use tokio::sync::{mpsc, oneshot};
 
-// Provisional, until they are sized from a measured startup of an endpoint dialing 20 peers.
+// Sized from a measured startup of an endpoint dialing 20 peers (PLAN, Limits).
 const LOGIN_SEND: Rate = Rate {
     per_sec: 50.0,
     burst: 200.0,

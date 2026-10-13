@@ -457,10 +457,13 @@ it later.
   - `send` refuses an envelope over 8 KiB with `InvalidInput`.
 - **Limits.**
   - Envelopes of up to 8 KiB. An offer or answer is about 3 KB, ML-KEM included.
-  - Token-bucket rates, provisional constants in `lib.rs` until a measured startup of an endpoint dialing 20 peers can
-    size them (that needs step 2's `Endpoint`):
-    - per login, which is per socket: 50/s, burst 200;
-    - per IP (IPv6 by its /64): 200/s, burst 800, charged for each login and each message;
+  - Token-bucket rates, sized from a measured startup: one endpoint dialing 20 peers through the forwarder, on loopback
+    (`tests/endpoints.rs`). The dialer sent 40 envelopes and the 20 peers 40, all within 0.7 s. The busiest 100 ms held
+    20 from the dialer and 38 from the peers. Nothing was refused.
+    - per login, which is per socket: 50/s, burst 200. The dialer's busiest second is 40, so the burst is 5× it, and
+      the rate exceeds the 40 it sends per second;
+    - per IP (IPv6 by its /64): 200/s, burst 800, charged for each login and each message. The startup's 80 sends
+      are a tenth of the burst, and the rate covers them within a second;
     - for a non-member only, per login and recipient: 1/s, burst 5. The per-IP bucket bounds the total across a host's
       logins.
   - Over a limit the sender gets `3`. A login over the per-IP bucket gets no reply, and its socket closes.
@@ -624,9 +627,9 @@ Each step lands with its tests and keeps the checks in AGENTS.md green.
    - an offline recipient;
    - limits;
    - a new login replacing an old one;
-   - two endpoints connecting through it. Skipped: it needs step 2's `Endpoint`.
+   - two endpoints connecting through it.
 
-   The limits are provisional here, sized once step 2 exists.
+   The limits are sized from a measured startup (see Limits).
 4. **Browser backend and wasm `WsSignal`.** wasm-bindgen tests in headless Chromium, run in CI:
    - browser↔browser within one page;
    - browser↔native through a forwarder the test starts.
