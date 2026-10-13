@@ -8,5 +8,5 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/spoj/letmetalk"
 
-[profile.dev.package.snow]
-opt-level = 3
+[profile.dev.package."*"]
+opt-level = 2

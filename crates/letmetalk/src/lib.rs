@@ -9,6 +9,8 @@ mod mux;
 mod stream;
 mod keys;
 mod signal;
+#[cfg(feature = "ws")]
+pub mod ws;
 
 pub use endpoint::{Admit, Endpoint};
 pub use keys::{PublicKey, SecretKey};
