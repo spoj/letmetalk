@@ -10,6 +10,7 @@ repository.workspace = true
 blake2 = "0.10"
 ciborium = "0.2.2"
 ed25519-dalek = "3"
+futures = "0.3"
 getrandom = "0.4"
 hex = "0.4"
 ml-kem = { version = "0.3", features = ["getrandom", "zeroize"] }
