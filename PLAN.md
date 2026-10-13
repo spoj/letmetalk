@@ -214,8 +214,8 @@ impl WsSignal {  // feature "ws"
   It never sees an address inside an envelope, or any SDP.
 - **Freshness.**
   - A message 1 more than 10 minutes old or ahead is dropped and logged.
-  - So is one whose session id was seen within that window. Session ids enter that cache only once their message 1
-    opens, so forged envelopes cannot fill it.
+  - So is one whose session id was seen within that window. A session id enters that cache only when the offer is
+    answered, after `admit`. The cache expires entries in order and holds at most 100,000, refusing to answer when full.
   - Answers count only for a session in progress. A garbled answer is dropped, and the dialer keeps waiting: snow
     keeps its state after a failed read.
   - Candidates are idempotent, so a replayed one does no harm.

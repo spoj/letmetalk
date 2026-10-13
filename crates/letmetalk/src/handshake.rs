@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashSet, VecDeque};
 use std::io;
 
 use blake2::{Blake2s256, Digest};
@@ -20,6 +20,7 @@ const KEM_CT: usize = 1088;
 const KEM_EK: usize = 1184;
 const MAX_MSG: usize = 65535;
 const MAX_AGE_MS: u64 = 10 * 60 * 1000;
+const CACHE_CAP: usize = 100_000;
 const CANDIDATE_NONCE: u64 = ((1 << 24) - 1) << 40;
 const INDEX_LIMIT: u64 = (1 << 40) - 1;
 
@@ -144,18 +145,22 @@ impl Dialer {
     }
 }
 
-/// Sessions whose offers opened, so that a replayed offer is refused.
+/// Sessions of answered offers, so that a replayed offer is refused. Entries are inserted in time order.
 #[derive(Default)]
-pub(crate) struct Replay(HashMap<[u8; 16], u64>);
+pub(crate) struct Replay {
+    order: VecDeque<(u64, [u8; 16])>,
+    seen: HashSet<[u8; 16]>,
+}
 
 impl Replay {
-    fn admit(&mut self, session: [u8; 16], sent_ms: u64, now_ms: u64) -> bool {
-        self.0.retain(|_, sent| *sent + MAX_AGE_MS >= now_ms);
-        if self.0.contains_key(&session) {
-            return false;
+    fn expire(&mut self, now_ms: u64) {
+        while let Some(&(expires_ms, session)) = self.order.front() {
+            if expires_ms >= now_ms {
+                break;
+            }
+            self.order.pop_front();
+            self.seen.remove(&session);
         }
-        self.0.insert(session, sent_ms);
-        true
     }
 }
 
@@ -170,7 +175,7 @@ pub(crate) struct Offer {
 impl Offer {
     pub(crate) fn receive(
         local: &SecretKey,
-        replay: &mut Replay,
+        replay: &Replay,
         envelope: &[u8],
         now_ms: u64,
     ) -> io::Result<Self> {
@@ -196,7 +201,7 @@ impl Offer {
         }
         let ek = EncapsulationKey::<MlKem768>::new_from_slice(&payload.ek.into_array())
             .map_err(io::Error::other)?;
-        if !replay.admit(session, payload.sent_ms, now_ms) {
+        if replay.seen.contains(&session) {
             return Err(io::Error::other("replayed offer"));
         }
         Ok(Self {
@@ -208,7 +213,23 @@ impl Offer {
         })
     }
 
-    pub(crate) fn answer(mut self, sdp: &str) -> io::Result<(Vec<u8>, Transport)> {
+    pub(crate) fn answer(
+        mut self,
+        replay: &mut Replay,
+        now_ms: u64,
+        sdp: &str,
+    ) -> io::Result<(Vec<u8>, Transport)> {
+        replay.expire(now_ms);
+        if replay.seen.contains(&self.session) {
+            return Err(io::Error::other("replayed offer"));
+        }
+        if replay.order.len() >= CACHE_CAP {
+            return Err(io::Error::other("replay cache full"));
+        }
+        replay.seen.insert(self.session);
+        replay
+            .order
+            .push_back((now_ms + 2 * MAX_AGE_MS, self.session));
         let (ct, secret) = self.ek.encapsulate();
         self.state
             .set_psk(2, &pq_psk(&secret, &ct))
@@ -327,9 +348,9 @@ mod tests {
 
     fn answered(from: &SecretKey, to: &SecretKey) -> (Dialer, Vec<u8>, Vec<u8>) {
         let (dialer, msg1) = dial(from, to, NOW);
-        let (msg2, _) = Offer::receive(to, &mut Replay::default(), &msg1, NOW)
+        let (msg2, _) = Offer::receive(to, &Replay::default(), &msg1, NOW)
             .unwrap()
-            .answer("answer")
+            .answer(&mut Replay::default(), NOW, "answer")
             .unwrap();
         (dialer, msg1, msg2)
     }
@@ -344,10 +365,10 @@ mod tests {
     fn full_handshake() {
         let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
         let (dialer, msg1) = dial(&alice, &bob, NOW);
-        let offer = Offer::receive(&bob, &mut Replay::default(), &msg1, NOW).unwrap();
+        let offer = Offer::receive(&bob, &Replay::default(), &msg1, NOW).unwrap();
         assert_eq!(offer.dialer, alice.public());
         assert_eq!(offer.sdp, "offer");
-        let (msg2, bob_t) = offer.answer("answer").unwrap();
+        let (msg2, bob_t) = offer.answer(&mut Replay::default(), NOW, "answer").unwrap();
         let (alice_t, sdp) = dialer.finish(&msg2).map_err(|(_, e)| e).unwrap();
         assert_eq!(sdp, "answer");
 
@@ -362,9 +383,9 @@ mod tests {
     fn garbled_answer_then_real_answer_succeeds() {
         let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
         let (dialer, msg1) = dial(&alice, &bob, NOW);
-        let (msg2, _) = Offer::receive(&bob, &mut Replay::default(), &msg1, NOW)
+        let (msg2, _) = Offer::receive(&bob, &Replay::default(), &msg1, NOW)
             .unwrap()
-            .answer("answer")
+            .answer(&mut Replay::default(), NOW, "answer")
             .unwrap();
         let Err((dialer, _)) = dialer.finish(&flipped(&msg2, msg2.len() - 1)) else {
             panic!("garbled answer accepted");
@@ -379,7 +400,7 @@ mod tests {
         let (_, msg1) = dial(&alice, &bob, NOW);
         for at in [HEADER + 5, msg1.len() - 1] {
             let bad = flipped(&msg1, at);
-            assert!(Offer::receive(&bob, &mut Replay::default(), &bad, NOW).is_err());
+            assert!(Offer::receive(&bob, &Replay::default(), &bad, NOW).is_err());
         }
     }
 
@@ -407,7 +428,7 @@ mod tests {
             SecretKey::generate(),
         );
         let (_, msg1) = dial(&alice, &bob, NOW);
-        assert!(Offer::receive(&carol, &mut Replay::default(), &msg1, NOW).is_err());
+        assert!(Offer::receive(&carol, &Replay::default(), &msg1, NOW).is_err());
     }
 
     #[test]
@@ -429,7 +450,7 @@ mod tests {
             &bob.public(),
             &payload,
         );
-        assert!(Offer::receive(&bob, &mut Replay::default(), &msg1, NOW).is_err());
+        assert!(Offer::receive(&bob, &Replay::default(), &msg1, NOW).is_err());
     }
 
     #[test]
@@ -450,7 +471,7 @@ mod tests {
                 &bob.public(),
                 &payload,
             );
-            assert!(Offer::receive(&bob, &mut Replay::default(), &msg1, NOW).is_err());
+            assert!(Offer::receive(&bob, &Replay::default(), &msg1, NOW).is_err());
         }
     }
 
@@ -459,14 +480,17 @@ mod tests {
         let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
         let (_, msg1) = dial(&alice, &bob, NOW);
         let mut replay = Replay::default();
-        assert!(Offer::receive(&bob, &mut replay, &msg1, NOW).is_ok());
-        assert!(Offer::receive(&bob, &mut replay, &msg1, NOW).is_err());
+        let first = Offer::receive(&bob, &replay, &msg1, NOW).unwrap();
+        let second = Offer::receive(&bob, &replay, &msg1, NOW).unwrap();
+        first.answer(&mut replay, NOW, "a").unwrap();
+        assert!(Offer::receive(&bob, &replay, &msg1, NOW).is_err());
+        assert!(second.answer(&mut replay, NOW, "b").is_err());
     }
 
     #[test]
     fn stale_and_future_offers_fail() {
         let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
-        let mut replay = Replay::default();
+        let replay = Replay::default();
         for (sent, ok) in [
             (NOW - TEN_MIN - 1, false),
             (NOW + TEN_MIN + 1, false),
@@ -474,7 +498,7 @@ mod tests {
             (NOW + TEN_MIN, true),
         ] {
             let (_, msg1) = dial(&alice, &bob, sent);
-            assert_eq!(Offer::receive(&bob, &mut replay, &msg1, NOW).is_ok(), ok);
+            assert_eq!(Offer::receive(&bob, &replay, &msg1, NOW).is_ok(), ok);
         }
     }
 
@@ -487,21 +511,110 @@ mod tests {
         );
         let (_, msg1) = dial(&alice, &bob, NOW);
         let (_, other) = dial(&carol, &bob, NOW);
-        let mut replay = Replay::default();
+        let replay = Replay::default();
         let with_stolen_id = [&msg1[..HEADER], &other[HEADER..]].concat();
         for forged in [flipped(&msg1, msg1.len() - 1), with_stolen_id] {
-            assert!(Offer::receive(&bob, &mut replay, &forged, NOW).is_err());
+            assert!(Offer::receive(&bob, &replay, &forged, NOW).is_err());
         }
-        assert!(Offer::receive(&bob, &mut replay, &msg1, NOW).is_ok());
+        assert!(Offer::receive(&bob, &replay, &msg1, NOW).is_ok());
+        assert!(replay.seen.is_empty());
+    }
+
+    #[test]
+    fn refused_offers_leave_cache_empty() {
+        let (alice, bob, carol) = (
+            SecretKey::generate(),
+            SecretKey::generate(),
+            SecretKey::generate(),
+        );
+        let replay = Replay::default();
+        let payload = |key: [u8; 32], ek| OfferPayload {
+            key: key.into(),
+            sent_ms: NOW,
+            ek,
+            sdp: "x".into(),
+        };
+        let honest = |payload: &OfferPayload| {
+            message1(
+                alice.x25519_secret(),
+                Box::new(DefaultResolver),
+                &bob.public(),
+                payload,
+            )
+        };
+        let refused = [
+            dial(&alice, &bob, NOW - TEN_MIN - 1).1,
+            dial(&alice, &bob, NOW + TEN_MIN + 1).1,
+            honest(&payload(carol.public().to_bytes(), fresh_ek())),
+            honest(&payload(
+                alice.public().to_bytes(),
+                ByteArray::new([0xff; KEM_EK]),
+            )),
+        ];
+        for msg1 in &refused {
+            assert!(Offer::receive(&bob, &replay, msg1, NOW).is_err());
+            assert!(replay.seen.is_empty());
+        }
+        let (_, ok) = dial(&alice, &bob, NOW);
+        assert!(Offer::receive(&bob, &replay, &ok, NOW).is_ok());
+        assert!(replay.seen.is_empty());
+    }
+
+    #[test]
+    fn full_cache_refuses_to_answer() {
+        let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
+        let (_, msg1) = dial(&alice, &bob, NOW);
+        let offer = Offer::receive(&bob, &Replay::default(), &msg1, NOW).unwrap();
+        let mut replay = Replay::default();
+        for i in 0..CACHE_CAP as u128 {
+            let session = i.to_be_bytes();
+            replay.order.push_back((NOW + 2 * TEN_MIN, session));
+            replay.seen.insert(session);
+        }
+        assert!(offer.answer(&mut replay, NOW, "answer").is_err());
+        assert_eq!(replay.order.len(), CACHE_CAP);
+    }
+
+    #[test]
+    fn cache_expires_after_two_max_ages() {
+        let (alice, bob, carol) = (
+            SecretKey::generate(),
+            SecretKey::generate(),
+            SecretKey::generate(),
+        );
+        let mut replay = Replay::default();
+        let (_, first) = dial(&alice, &bob, NOW + TEN_MIN);
+        let id: [u8; 16] = first[2..HEADER].try_into().unwrap();
+        Offer::receive(&bob, &replay, &first, NOW)
+            .unwrap()
+            .answer(&mut replay, NOW, "a")
+            .unwrap();
+
+        let last = NOW + 2 * TEN_MIN;
+        assert!(Offer::receive(&bob, &replay, &first, last).is_err());
+        let (_, second) = dial(&carol, &bob, last);
+        Offer::receive(&bob, &replay, &second, last)
+            .unwrap()
+            .answer(&mut replay, last, "b")
+            .unwrap();
+        assert!(replay.seen.contains(&id));
+
+        let (_, third) = dial(&alice, &bob, last + 1);
+        Offer::receive(&bob, &replay, &third, last + 1)
+            .unwrap()
+            .answer(&mut replay, last + 1, "c")
+            .unwrap();
+        assert!(!replay.seen.contains(&id));
+        assert_eq!(replay.seen.len(), 2);
     }
 
     #[test]
     fn candidates_replayed_and_out_of_order() {
         let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
         let (dialer, msg1) = dial(&alice, &bob, NOW);
-        let (msg2, bob_t) = Offer::receive(&bob, &mut Replay::default(), &msg1, NOW)
+        let (msg2, bob_t) = Offer::receive(&bob, &Replay::default(), &msg1, NOW)
             .unwrap()
-            .answer("answer")
+            .answer(&mut Replay::default(), NOW, "answer")
             .unwrap();
         let (alice_t, _) = dialer.finish(&msg2).map_err(|(_, e)| e).unwrap();
 
@@ -529,9 +642,9 @@ mod tests {
     fn candidate_index_limits() {
         let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
         let (dialer, msg1) = dial(&alice, &bob, NOW);
-        let (msg2, bob_t) = Offer::receive(&bob, &mut Replay::default(), &msg1, NOW)
+        let (msg2, bob_t) = Offer::receive(&bob, &Replay::default(), &msg1, NOW)
             .unwrap()
-            .answer("answer")
+            .answer(&mut Replay::default(), NOW, "answer")
             .unwrap();
         let (alice_t, _) = dialer.finish(&msg2).map_err(|(_, e)| e).unwrap();
 
