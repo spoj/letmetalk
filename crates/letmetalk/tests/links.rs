@@ -3,8 +3,9 @@ mod common;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use common::{Carrier, Hub};
+use common::{Carrier, Hub, round_trip, serve};
 use letmetalk::{Admit, Endpoint, SecretKey};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -86,4 +87,60 @@ async fn silent_peer_times_out() {
     let _silent = Carrier::join(&hub, &b_key);
     let err = a.connect(b_key.public(), "echo").await.err().unwrap();
     assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+}
+
+#[tokio::test]
+async fn replayed_offer_cannot_replace_a_live_link_and_a_fresh_one_does() {
+    let hub = Hub::default();
+    let (a_key, b_key) = (SecretKey::generate(), SecretKey::generate());
+    let a = endpoint(&hub, &a_key, |_| Admit::Direct);
+    let b = endpoint(&hub, &b_key, |_| Admit::Direct);
+    tokio::spawn(serve(b.clone()));
+    let mut first = a.connect(b_key.public(), "echo").await.unwrap();
+    let offer = hub
+        .sent()
+        .into_iter()
+        .find(|(from, to, envelope)| *from == a_key.public() && *to == b_key.public() && envelope[1] == 1)
+        .unwrap()
+        .2;
+    hub.inject(b_key.public(), offer);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    first.write_all(b"ping").await.unwrap();
+    first.shutdown().await.unwrap();
+    let mut echoed = Vec::new();
+    first.read_to_end(&mut echoed).await.unwrap();
+    assert_eq!(echoed, b"ping");
+
+    let mut second = a.connect(b_key.public(), "echo").await.unwrap();
+    let a_again = endpoint(&hub, &a_key, |_| Admit::Direct);
+    round_trip(&a_again, b_key.public()).await.unwrap();
+    let mut buf = [0; 1];
+    let err = tokio::time::timeout(Duration::from_secs(10), second.read(&mut buf))
+        .await
+        .expect("the replaced link closes")
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+}
+
+#[tokio::test]
+async fn offer_relayed_to_another_key_gets_no_link() {
+    let hub = Hub::default();
+    let (a_key, b_key, m_key) = (SecretKey::generate(), SecretKey::generate(), SecretKey::generate());
+    let a = endpoint(&hub, &a_key, |_| Admit::Direct);
+    let b = endpoint(&hub, &b_key, |_| Admit::Direct);
+    let _m = Carrier::join(&hub, &m_key);
+    hub.redirect(a_key.public(), m_key.public(), b_key.public());
+    let dialed = tokio::time::timeout(Duration::from_secs(2), a.connect(m_key.public(), "echo")).await;
+    assert!(dialed.is_err());
+    assert!(tokio::time::timeout(Duration::from_secs(2), b.accept()).await.is_err());
+}
+
+#[tokio::test]
+async fn relayed_link_without_a_relay_server_is_unsupported() {
+    let hub = Hub::default();
+    let (a_key, b_key) = (SecretKey::generate(), SecretKey::generate());
+    let a = endpoint(&hub, &a_key, |_| Admit::Relayed);
+    let _b = endpoint(&hub, &b_key, |_| Admit::Direct);
+    let err = a.connect(b_key.public(), "echo").await.err().unwrap();
+    assert_eq!(err.kind(), io::ErrorKind::Unsupported);
 }

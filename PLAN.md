@@ -155,6 +155,7 @@ impl WsSignal {  // feature "ws"
   - `TimedOut`: no link formed within 15 s. A refusal looks the same, since refusals are silent.
   - `ResourceBusy`: no new link fits, because every link at the cap holds streams.
   - `ConnectionReset`: the stream, or its link, died, was reset, or failed to decrypt.
+  - `Unsupported`: a relayed link was asked for, and the carrier gave no TURN server.
 - **Streams.** Dropping a stream before `shutdown` resets it; after `shutdown`, it discards what the peer still sends until
   the peer finishes, so the peer can finish. To refuse an unknown protocol, the accepter drops the
   stream.
@@ -222,6 +223,7 @@ impl WsSignal {  // feature "ws"
   - Answers count only for a session in progress. A garbled answer is dropped, and the dialer keeps waiting: snow
     keeps its state after a failed read.
   - Candidates are idempotent, so a replayed one does no harm.
+  - An offer whose session id is already in progress is refused, so it cannot take over that session's routing.
 - **Libraries:** snow (RustCrypto resolver) and ml-kem (RustCrypto). Both build for wasm32.
 - **Why not HPKE envelopes and signatures:** they would be neither deniable nor forward secret for the answer.
   One Noise handshake gives authentication, deniability, forward secrecy after message 1, and resistance to
@@ -245,7 +247,7 @@ impl WsSignal {  // feature "ws"
     - drops anything it cannot open;
     - applies `admit`, and a refusal gets no reply;
     - does the same with an answer in message 2, then its own candidates.
-  - Candidates that arrive early are held until they can be applied.
+  - Candidates that arrive early are held, up to 16, until they can be applied.
 - **Connect.** `connect` uses a confirmed link if one is live. Otherwise it waits for the setup already under way to
   that key, or starts one. A setup that ends without a link fails the waiting `connect` with `TimedOut`.
 - **Confirmation.** When its control channel opens (the dialer's own open, the accepter's when the dialer's arrives),
@@ -289,9 +291,9 @@ impl WsSignal {  // feature "ws"
 ### Streams
 
 - **Channels.** Each stream is one data channel, reliable and ordered, opened in band (DCEP).
-  - Native closes wait until SCTP has acknowledged what was sent. webrtc-rs's close can overtake data still in flight,
-    so the peer then loses the final `Finish`. A browser's close waits until `bufferedAmount` is 0, since browsers expose
-    no acknowledgements.
+  - Native closes wait until SCTP has acknowledged what was sent, for at most 10 s. webrtc-rs's close can overtake data
+    still in flight, so the peer then loses the final `Finish`. A browser's close waits until `bufferedAmount` is 0,
+    since browsers expose no acknowledgements.
   - Streams open only once the link is confirmed. That also avoids a webrtc-rs bug: a channel the answering side opens
     just after ICE connects, before SCTP is up, never opens.
   - A browser opener writes at once. A native opener waits for the peer's DCEP ack.
@@ -300,7 +302,8 @@ impl WsSignal {  // feature "ws"
 - **Numbers.** Streams are numbered by letmetalk, not by channel id, since webrtc-rs's `id()` is only a local handle.
   - The link's dialer opens even numbers and its accepter odd ones. Numbers are never reused on a link, and an open
     past the 24-bit range fails with `ResourceBusy` (about 2²³ streams from one side).
-  - Stream 0 is the control channel. Number 2²⁴−1 is reserved for `Candidates` envelopes.
+  - Stream 0 is the control channel, and it opens once: a second open fails the link. Number 2²⁴−1 is reserved for
+    `Candidates` envelopes.
   - The DCEP label carries the number. The protocol name travels encrypted in the stream's first message, which also
     sidesteps web-sys having no getter for a channel's protocol.
   - **Checks on each open by the peer.** The number must:
@@ -316,11 +319,13 @@ impl WsSignal {  // feature "ws"
     key of its direction.
   - Its nonce is the stream's number (24 bits) and the message's index on that stream (40 bits). Channels deliver in
     order and lose nothing, so the nonce is implicit.
-  - A replayed, reordered, dropped or moved message fails to open, and fails its stream.
+  - A replayed, reordered, dropped or moved message fails to open, and fails its stream. A sender whose index would
+    pass 2⁴⁰ fails the stream, or the link on the control channel.
   - Since numbers are never reused, and the peer's are checked, no nonce repeats under a key.
 - **Messages.** Plaintexts start with a type:
   - on a stream: `Open(protocol)` (the first message), `Data`, `Finish`;
   - on the control channel: `Hello`, `Credit(stream, bytes)`, `Reset(stream)`.
+  - A `Data` after the peer's `Finish`, and a `Reset` of the control channel, fail the link.
 
   Data goes in messages of at most 16 KiB, so a small message on one stream never waits behind a large one on another.
   Data channels have no half-close, so `Finish` stands in for one, and a channel closes once both sides have finished.
@@ -331,9 +336,11 @@ impl WsSignal {  // feature "ws"
     - Every stream starts with 16 KiB of credit on both sides, with no message. Only `Data` bytes count; `Open` is
       not counted, and its protocol name is at most 255 bytes.
     - The reader grants more: up to 16 KiB until the app accepts a stream, then up to 1 MiB, and more as the app reads.
-    - It never has more than the link's budget granted at once: 4 MiB for a Direct link, 256 KiB for a Relayed one.
+      A grant goes out only once it is at least 16 KiB, so small reads don't flood the control channel.
+    - Each stream keeps its first 16 KiB outside the budget, so every stream can always progress. Above that, streams
+      share the link's budget: 4 MiB for a Direct link, 256 KiB for a Relayed one.
   - **Enforcement.** The sender never sends past its credit. A message past it fails the link, so what a peer can make
-    an endpoint hold is bounded by its link's budget.
+    an endpoint hold is bounded by budget + 16 KiB × open streams. A peer whose credit would pass 1 MiB fails the link.
   - **On native,** the sender also caps each channel's send buffer and waits on `writable()`. webrtc-rs's
     `OnBufferedAmountLow` proved unreliable: it fired with 3 MB still queued.
   - **In browsers,** the sender waits while `bufferedAmount` is 1 MiB or more, and resumes on `bufferedamountlow`, set
@@ -351,6 +358,12 @@ impl WsSignal {  // feature "ws"
   - It gathers host, server-reflexive and TURN relay candidates itself, and resolves browsers' mDNS (`.local`)
     candidates.
   - It supports the relay-only policy, ICE-TCP and ICE restart.
+  - **Socket buffers.** webrtc-rs binds its UDP sockets with the OS defaults, which drop packets under bulk load. So
+    every socket gets 4 MiB send and receive buffers, through a `Runtime` wrapper (`with_runtime`). Linux caps the
+    request at `net.core.rmem_max`, which is 208 KiB on stock kernels, so a host that keeps the default gets smaller
+    buffers. Spike 2 measured the drops and the 1 s stalls that this removes.
+  - **SCTP MTU stays at webrtc-rs's default.** MTU 1400 gained 13% on loopback in spike 2. It is unvalidated on real
+    paths and risks black holes on tunnels (WireGuard 1420, tailscale 1280) and TURN, so it is rejected for the trial.
   - **TURN over UDP only.** It skips `turns:` and TCP TURN URLs. TURN over TCP is planned for after its 1.0
     (webrtc#848; PR #907 is open), and nothing tracks TLS. So a native endpoint on a network that blocks UDP has no
     relay.
@@ -359,8 +372,10 @@ impl WsSignal {  // feature "ws"
   - Its DTLS is 1.2 only, and DTLS 1.3 waits until after its 1.0 (webrtc#801). That doesn't touch the guarantees.
   - 0.21 (September 2026) is its pre-1.0 line, the run-up to 1.0. It is weeks old, so step 0 tests it before anything
     is built on it.
-- **Why not str0m:** it leaves NIC enumeration, STUN and TURN outside its scope, so we would write candidate gathering
-  and a TURN client. Its README also says peer-to-peer "has received less testing" than its SFU use.
+- **Why not str0m:** at equal settings it was 2.2–2.8× slower in spike 2 (106 vs 233 MB/s with MTU 1400; 74 vs 206
+  MB/s with 4 MiB buffers), with worse latency under load (9–14 ms p50 against 3–4 ms). Its single event queue gives no
+  per-channel isolation, so it would need the same credit layer. Its per-SACK cost is sctp-proto's, not a setting. It
+  also leaves NIC enumeration, STUN and TURN outside its scope, so we would write candidate gathering and a TURN client.
   - It remains the fallback, so letmetalk reaches the native stack through a narrow seam that str0m could also sit
     behind: create a link, set the remote description, add candidates, open, send, receive and close channels, and
     events.
@@ -450,10 +465,13 @@ it later.
   - `send` refuses an envelope over 8 KiB with `InvalidInput`.
 - **Limits.**
   - Envelopes of up to 8 KiB. An offer or answer is about 3 KB, ML-KEM included.
-  - Token-bucket rates, provisional constants in `lib.rs` until a measured startup of an endpoint dialing 20 peers can
-    size them (that needs step 2's `Endpoint`):
-    - per login, which is per socket: 50/s, burst 200;
-    - per IP (IPv6 by its /64): 200/s, burst 800, charged for each login and each message;
+  - Token-bucket rates, sized from a measured startup: one endpoint dialing 20 peers through the forwarder, on loopback
+    (`tests/endpoints.rs`). The dialer sent 40 envelopes and the 20 peers 40, all within 0.7 s. The busiest 100 ms held
+    20 from the dialer and 38 from the peers. Nothing was refused.
+    - per login, which is per socket: 50/s, burst 200. The dialer's busiest second is 40, so the burst is 5× it, and
+      the rate exceeds the 40 it sends per second;
+    - per IP (IPv6 by its /64): 200/s, burst 800, charged for each login and each message. The startup's 80 sends
+      are a tenth of the burst, and the rate covers them within a second;
     - for a non-member only, per login and recipient: 1/s, burst 5. The per-IP bucket bounds the total across a host's
       logins.
   - Over a limit the sender gets `3`. A login over the per-IP bucket gets no reply, and its socket closes.
@@ -636,9 +654,9 @@ Each step lands with its tests and keeps the checks in AGENTS.md green.
    - an offline recipient;
    - limits;
    - a new login replacing an old one;
-   - two endpoints connecting through it. Skipped: it needs step 2's `Endpoint`.
+   - two endpoints connecting through it.
 
-   The limits are provisional here, sized once step 2 exists.
+   The limits are sized from a measured startup (see Limits).
 4. **Browser backend and wasm `WsSignal`.** wasm-bindgen tests in headless Chromium, run in CI by
    `scripts/browser-tests.sh`. The script starts a forwarder and a native echo endpoint on loopback, and builds the tests
    with their URL and key in `LETMETALK_TEST_SIGNAL` and `LETMETALK_TEST_ECHO`.

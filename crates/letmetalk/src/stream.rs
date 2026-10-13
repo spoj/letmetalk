@@ -9,7 +9,7 @@ use futures::channel::oneshot;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::keys::PublicKey;
-use crate::mux::{CHUNK, FIRST_CREDIT, Mux, Plain};
+use crate::mux::{CHUNK, FIRST_CREDIT, Mux, Plain, reset};
 
 pub(crate) struct Io {
     pub(crate) number: u32,
@@ -83,21 +83,6 @@ impl Io {
         self.state.lock().unwrap()
     }
 
-    pub(crate) fn is_waiting(&self) -> bool {
-        let s = self.state();
-        s.opened && !s.accepted
-    }
-
-    pub(crate) fn is_done(&self) -> bool {
-        let s = self.state();
-        s.local_finished && s.remote_finished
-    }
-
-    pub(crate) fn is_drained(&self) -> bool {
-        let s = self.state();
-        s.local_finished && s.remote_finished && s.inbox.is_empty()
-    }
-
     pub(crate) fn fail(&self) {
         let mut s = self.state();
         s.failed = true;
@@ -111,7 +96,7 @@ impl Io {
 /// A reliable, ordered, two-way byte stream to a peer. Dropping it before `shutdown` resets it.
 pub struct Stream {
     mux: Arc<Mux>,
-    pub(crate) io: Arc<Io>,
+    io: Arc<Io>,
     protocol: String,
 }
 
@@ -131,17 +116,13 @@ impl Stream {
     pub(crate) fn accept(&self) {
         self.mux.accept(self.io.number);
     }
-
-    fn reset() -> io::Error {
-        io::Error::new(io::ErrorKind::ConnectionReset, "stream reset")
-    }
 }
 
 impl AsyncRead for Stream {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         let mut s = self.io.state();
         if s.failed {
-            return Poll::Ready(Err(Self::reset()));
+            return Poll::Ready(Err(reset()));
         }
         if s.inbox.is_empty() {
             if s.remote_finished {
@@ -168,7 +149,7 @@ impl AsyncWrite for Stream {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let mut s = self.io.state();
         if s.failed {
-            return Poll::Ready(Err(Self::reset()));
+            return Poll::Ready(Err(reset()));
         }
         if s.queued_finish {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "stream shut down")));
@@ -180,7 +161,7 @@ impl AsyncWrite for Stream {
         let n = buf.len().min(s.credit).min(CHUNK);
         s.credit -= n;
         if s.outbox.unbounded_send(Plain::Data(buf[..n].to_vec())).is_err() {
-            return Poll::Ready(Err(Self::reset()));
+            return Poll::Ready(Err(reset()));
         }
         Poll::Ready(Ok(n))
     }
@@ -192,7 +173,7 @@ impl AsyncWrite for Stream {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut s = self.io.state();
         if s.failed {
-            return Poll::Ready(Err(Self::reset()));
+            return Poll::Ready(Err(reset()));
         }
         if !s.queued_finish {
             s.queued_finish = true;

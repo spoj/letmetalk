@@ -23,7 +23,7 @@ const MAX_AGE_MS: u64 = 10 * 60 * 1000;
 const CACHE_CAP: usize = 100_000;
 const CANDIDATE_NONCE: u64 = ((1 << 24) - 1) << 40;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Offer = 1,
     Answer = 2,
@@ -87,11 +87,10 @@ impl Dialer {
     pub(crate) fn dial(
         local: &SecretKey,
         peer: &PublicKey,
+        session: [u8; 16],
         sent_ms: u64,
         sdp: String,
     ) -> io::Result<(Self, Vec<u8>)> {
-        let mut session = [0; 16];
-        getrandom::fill(&mut session).expect("OS randomness");
         let (decaps, encaps) = MlKem768::generate_keypair();
         let payload = OfferPayload {
             key: local.public().to_bytes().into(),
@@ -300,7 +299,7 @@ impl Transport {
         Ok(frame(Kind::Candidates, session, &body))
     }
 
-    pub(crate) fn open_candidates(&self, envelope: &[u8]) -> io::Result<(u64, Vec<u8>)> {
+    pub(crate) fn open_candidates(&self, envelope: &[u8]) -> io::Result<Vec<u8>> {
         let (_, body) = unframe(envelope, Kind::Candidates)?;
         if body.len() < 5 {
             return Err(io::Error::other("short candidates"));
@@ -308,7 +307,7 @@ impl Transport {
         let mut bytes = [0; 8];
         bytes[3..].copy_from_slice(&body[..5]);
         let index = u64::from_be_bytes(bytes);
-        Ok((index, self.open(CANDIDATE_NONCE | index, &body[5..])?))
+        self.open(CANDIDATE_NONCE | index, &body[5..])
     }
 }
 
@@ -405,7 +404,9 @@ mod tests {
     const TEN_MIN: u64 = MAX_AGE_MS;
 
     fn dial(from: &SecretKey, to: &SecretKey, sent_ms: u64) -> (Dialer, Vec<u8>) {
-        Dialer::dial(from, &to.public(), sent_ms, "offer".into()).unwrap()
+        let mut session = [0; 16];
+        getrandom::fill(&mut session).unwrap();
+        Dialer::dial(from, &to.public(), session, sent_ms, "offer".into()).unwrap()
     }
 
     fn fresh_ek() -> ByteArray<KEM_EK> {
@@ -758,18 +759,9 @@ mod tests {
         let session = [3; 16];
         let first = alice_t.seal_candidates(&session, 0, b"zero").unwrap();
         let second = alice_t.seal_candidates(&session, 1, b"one").unwrap();
-        assert_eq!(
-            bob_t.open_candidates(&second).unwrap(),
-            (1, b"one".to_vec())
-        );
-        assert_eq!(
-            bob_t.open_candidates(&first).unwrap(),
-            (0, b"zero".to_vec())
-        );
-        assert_eq!(
-            bob_t.open_candidates(&first).unwrap(),
-            (0, b"zero".to_vec())
-        );
+        assert_eq!(bob_t.open_candidates(&second).unwrap(), b"one");
+        assert_eq!(bob_t.open_candidates(&first).unwrap(), b"zero");
+        assert_eq!(bob_t.open_candidates(&first).unwrap(), b"zero");
 
         let moved = [&first[..HEADER], &[0, 0, 0, 0, 1], &first[HEADER + 5..]].concat();
         assert!(bob_t.open_candidates(&moved).is_err());
@@ -789,10 +781,7 @@ mod tests {
         let last = alice_t
             .seal_candidates(&session, (1 << 40) - 2, b"x")
             .unwrap();
-        assert_eq!(
-            bob_t.open_candidates(&last).unwrap(),
-            ((1 << 40) - 2, b"x".to_vec())
-        );
+        assert_eq!(bob_t.open_candidates(&last).unwrap(), b"x");
 
         let max_index = [&last[..HEADER], &[0xff; 5], &last[HEADER + 5..]].concat();
         assert!(bob_t.open_candidates(&max_index).is_err());

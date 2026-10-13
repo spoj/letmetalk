@@ -122,7 +122,7 @@ async fn relayed_dial_without_a_relay_forms_no_link() {
     let Err(error) = within(a.connect(b_key.public(), "echo")).await else {
         panic!("a link formed without a relay");
     };
-    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
 }
 
 /// Waits until the forwarder has logged the carrier in, which gives it ICE servers.

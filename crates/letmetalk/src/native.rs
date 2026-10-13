@@ -1,10 +1,12 @@
 //! The native backend: webrtc-rs 0.21, with its UDP sockets bound to physical interfaces.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -15,6 +17,7 @@ use futures::StreamExt;
 use n0_future::task::spawn;
 use n0_future::time::sleep;
 use webrtc::data_channel::{DataChannel, DataChannelEvent};
+use webrtc::runtime::{AsyncInterval, AsyncTcpListener, AsyncTcpStream, AsyncUdpSocket, JoinHandle, Runtime, default_runtime};
 use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
     RTCIceCandidateInit, RTCIceServer, RTCIceTransportPolicy, RTCPeerConnectionIceEvent,
@@ -25,6 +28,60 @@ use crate::IceServer;
 use crate::backend::{Event, Peer};
 
 const SEND_BUFFER: usize = 1 << 20;
+const SOCKET_BUFFER: usize = 4 << 20;
+
+/// webrtc-rs binds its UDP sockets with the OS's default buffers, which drop packets under bulk load. This runtime
+/// sizes each socket's buffers before webrtc-rs wraps it. Linux caps the request at `net.core.rmem_max`.
+#[derive(Debug)]
+struct Buffers(Arc<dyn Runtime>);
+
+impl Runtime for Buffers {
+    fn spawn(&self, future: Pin<Box<dyn Future<Output = ()> + Send>>) -> Box<dyn JoinHandle> {
+        self.0.spawn(future)
+    }
+
+    fn spawn_reactor(&self, n: usize, future: Pin<Box<dyn Future<Output = ()> + Send>>) -> Box<dyn JoinHandle> {
+        self.0.spawn_reactor(n, future)
+    }
+
+    fn wrap_udp_socket(&self, sock: std::net::UdpSocket) -> io::Result<Arc<dyn AsyncUdpSocket>> {
+        let socket = socket2::SockRef::from(&sock);
+        socket.set_recv_buffer_size(SOCKET_BUFFER)?;
+        socket.set_send_buffer_size(SOCKET_BUFFER)?;
+        self.0.wrap_udp_socket(sock)
+    }
+
+    fn wrap_tcp_listener(&self, listener: std::net::TcpListener) -> io::Result<Arc<dyn AsyncTcpListener>> {
+        self.0.wrap_tcp_listener(listener)
+    }
+
+    fn connect_tcp<'a>(
+        &'a self,
+        addr: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = io::Result<Arc<dyn AsyncTcpStream>>> + Send + 'a>> {
+        self.0.connect_tcp(addr)
+    }
+
+    fn resolve_host<'a>(&'a self, host: &'a str) -> Pin<Box<dyn Future<Output = io::Result<Vec<SocketAddr>>> + Send + 'a>> {
+        self.0.resolve_host(host)
+    }
+
+    fn now(&self) -> Instant {
+        self.0.now()
+    }
+
+    fn sleep(&self, d: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+        self.0.sleep(d)
+    }
+
+    fn interval(&self, period: Duration) -> Box<dyn AsyncInterval> {
+        self.0.interval(period)
+    }
+
+    fn block_on(&self, future: Pin<Box<dyn Future<Output = ()> + '_>>) {
+        self.0.block_on(future)
+    }
+}
 
 /// Interfaces that are physical and up, with their addresses. Without any, loopback, so that peers on this
 /// machine still connect.
@@ -104,8 +161,8 @@ impl PeerConnectionEventHandler for Handler {
             let _ = dc.close().await;
             return;
         };
-        let _ = self.0.events.unbounded_send(Event::Opened(n));
         self.0.register(n, dc);
+        let _ = self.0.events.unbounded_send(Event::Opened(n));
     }
 }
 
@@ -142,6 +199,7 @@ pub(crate) fn peer(ice: &[IceServer], relay_only: bool) -> BoxFuture<'static, io
         let pc = PeerConnectionBuilder::new()
             .with_configuration(config)
             .with_handler(Arc::new(Handler(shared.clone())))
+            .with_runtime(Arc::new(Buffers(default_runtime().expect("webrtc-rs has a tokio runtime"))))
             .with_udp_addrs(bind_addrs())
             .with_data_channel_send_buffer_limit(SEND_BUFFER)
             .build()
@@ -207,12 +265,16 @@ impl Peer for Native {
         })
     }
 
-    /// Closes once SCTP has acknowledged what was sent: webrtc-rs's close can overtake data still in flight.
+    /// Closes once SCTP has acknowledged what was sent: webrtc-rs's close can overtake data still in flight. A peer
+    /// that never acknowledges is given up on after 10 s.
     fn close_channel(&self, channel: u32) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             if let Ok(dc) = self.shared.channel(channel) {
-                while dc.outstanding_bytes().await.is_ok_and(|n| n > 0) {
-                    sleep(Duration::from_millis(1)).await;
+                for _ in 0..400 {
+                    if !dc.outstanding_bytes().await.is_ok_and(|n| n > 0) {
+                        break;
+                    }
+                    sleep(Duration::from_millis(25)).await;
                 }
                 let _ = dc.close().await;
             }
@@ -262,6 +324,20 @@ mod tests {
                 return event;
             }
         }
+    }
+
+    #[tokio::test]
+    async fn udp_sockets_get_the_buffers_the_host_allows() {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let probe = sock.try_clone().unwrap();
+        Buffers(default_runtime().unwrap()).wrap_udp_socket(sock).unwrap();
+        let direct = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let direct = socket2::SockRef::from(&direct);
+        direct.set_recv_buffer_size(SOCKET_BUFFER).unwrap();
+        assert_eq!(
+            socket2::SockRef::from(&probe).recv_buffer_size().unwrap(),
+            direct.recv_buffer_size().unwrap()
+        );
     }
 
     #[tokio::test]

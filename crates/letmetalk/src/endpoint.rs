@@ -2,12 +2,14 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
+use futures::FutureExt;
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::channel::oneshot;
+use futures::future::{Either, select};
 use futures::lock::Mutex as AsyncMutex;
 use n0_future::task::spawn;
 use n0_future::time::{SystemTime, sleep, timeout};
@@ -28,6 +30,7 @@ const DIRECT_SETUPS: usize = 16;
 const RELAYED_SETUPS: usize = 8;
 const DIRECT_BUDGET: usize = 4 << 20;
 const RELAYED_BUDGET: usize = 256 << 10;
+const MAX_HELD: usize = 16;
 
 /// What this endpoint does with a key: refuse it, or link to it relayed or directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +162,23 @@ impl State {
         Ok(())
     }
 
+    /// Reserves the setup of a dial to `to`, before its peer exists, so that no second dial starts meanwhile.
+    fn reserve_dial(
+        &mut self,
+        to: PublicKey,
+        class: Class,
+    ) -> io::Result<([u8; 16], UnboundedSender<Input>, UnboundedReceiver<Input>)> {
+        self.make_room(class)?;
+        let mut session = [0; 16];
+        getrandom::fill(&mut session).expect("OS randomness");
+        let (tx, rx) = unbounded();
+        let since = self.tick();
+        let setup = Setup { session, tx: tx.clone(), dialed: true, sent_ms: now_ms(), class, since };
+        self.links.entry(to.x25519()).or_default().setup = Some(setup);
+        self.sessions.insert(session, tx.clone());
+        Ok((session, tx, rx))
+    }
+
     /// Decides whether to answer an offer from `dialer`: crossed offers keep the smaller key's, and a newer offer
     /// replaces an older inbound setup.
     fn admit_inbound(&mut self, me: PublicKey, dialer: PublicKey, sent_ms: u64, class: Class) -> io::Result<()> {
@@ -199,24 +219,15 @@ struct Inner {
     accepts: UnboundedSender<Stream>,
     accepted: AsyncMutex<UnboundedReceiver<Stream>>,
     state: Mutex<State>,
+    stop: Mutex<Option<oneshot::Sender<()>>>,
 }
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).expect("clock is after 1970").as_millis() as u64
 }
 
-fn session_of(envelope: &[u8]) -> [u8; 16] {
-    envelope[2..18].try_into().expect("envelopes have a session id")
-}
-
-fn expire_after(tx: UnboundedSender<Input>, after: Duration) {
-    spawn(async move {
-        sleep(after).await;
-        let _ = tx.unbounded_send(Input::Expire);
-    });
-}
-
 impl Inner {
+    /// Forgets a setup or link of `session`, and the waiters of a key left without one.
     fn unlink(&self, key: PublicKey, session: [u8; 16]) {
         let mut st = self.state.lock().unwrap();
         st.sessions.remove(&session);
@@ -230,6 +241,9 @@ impl Inner {
         if entry.up.as_ref().is_some_and(|u| u.session == session) {
             entry.up = None;
         }
+        if entry.setup.is_none() {
+            entry.waiters.clear();
+        }
         if entry.up.is_none() && entry.setup.is_none() {
             st.links.remove(&k);
         }
@@ -242,13 +256,18 @@ impl Inner {
         }
     }
 
-    fn confirm(&self, key: PublicKey, session: [u8; 16], tx: UnboundedSender<Input>, mux: Arc<Mux>, class: Class) {
+    /// Makes the setup of `session` a link, and replaces the old one. False if that setup has since ended.
+    fn confirm(&self, key: PublicKey, session: [u8; 16], tx: UnboundedSender<Input>, mux: Arc<Mux>, class: Class) -> bool {
         let mut st = self.state.lock().unwrap();
         let used = st.tick();
-        let entry = st.links.entry(key.x25519()).or_default();
-        if entry.setup.as_ref().is_some_and(|s| s.session == session) {
-            entry.setup = None;
-        }
+        let Some(entry) = st
+            .links
+            .get_mut(&key.x25519())
+            .filter(|e| e.setup.as_ref().is_some_and(|s| s.session == session))
+        else {
+            return false;
+        };
+        entry.setup = None;
         let old = entry.up.replace(Up { session, tx, mux: mux.clone(), class, used, connected: true });
         for waiter in entry.waiters.drain(..) {
             let _ = waiter.send(mux.clone());
@@ -256,65 +275,62 @@ impl Inner {
         if let Some(old) = old {
             let _ = old.tx.unbounded_send(Input::End);
         }
+        true
     }
 
-    async fn dial(self: &Arc<Self>, to: PublicKey, class: Class) -> io::Result<()> {
-        let peer = peer(&self.signal.ice_servers(), class == Class::Relayed).await?;
-        let sdp = match peer.offer().await {
-            Ok(sdp) => sdp,
+    async fn new_peer(&self, class: Class) -> io::Result<Arc<dyn Peer>> {
+        let ice = self.signal.ice_servers();
+        if class == Class::Relayed && ice.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "no relay server to relay through"));
+        }
+        peer(&ice, class == Class::Relayed).await
+    }
+
+    async fn dial(
+        self: &Arc<Self>,
+        to: PublicKey,
+        class: Class,
+        session: [u8; 16],
+        tx: UnboundedSender<Input>,
+        rx: UnboundedReceiver<Input>,
+    ) -> io::Result<()> {
+        let peer = self.new_peer(class).await.inspect_err(|_| self.unlink(to, session))?;
+        let mut link = Link::new(self.clone(), to, session, class, true, peer, tx);
+        let msg1 = match link.make_offer().await {
+            Ok(msg1) => msg1,
             Err(e) => {
-                peer.close().await;
+                link.close().await;
                 return Err(e);
             }
         };
-        let sent_ms = now_ms();
-        let (dialer, msg1) = Dialer::dial(&self.key, &to, sent_ms, sdp)?;
-        let session = session_of(&msg1);
-        let (tx, rx) = unbounded();
-        {
-            let mut st = self.state.lock().unwrap();
-            if st.links.get(&to.x25519()).is_some_and(|e| e.setup.is_some()) {
-                return Ok(());
-            }
-            let since = st.tick();
-            st.links.entry(to.x25519()).or_default().setup =
-                Some(Setup { session, tx: tx.clone(), dialed: true, sent_ms, class, since });
-            st.sessions.insert(session, tx.clone());
-        }
-        let mut link = Link::new(self.clone(), to, session, class, true, peer, tx.clone());
-        link.dialer = Some(dialer);
-        expire_after(tx.clone(), DIAL_TIMEOUT);
-        link.start(rx);
         if let Err(e) = self.signal.send(to, msg1).await {
-            let _ = tx.unbounded_send(Input::End);
+            link.close().await;
             return Err(e);
         }
+        link.start(rx);
         Ok(())
     }
 
     async fn link_to(self: &Arc<Self>, to: PublicKey) -> io::Result<Arc<Mux>> {
         let class = Class::of((self.admit)(&to))?;
-        let (rx, dial) = {
+        let (rx, setup) = {
             let mut st = self.state.lock().unwrap();
             if st.closed {
                 return Err(io::Error::new(io::ErrorKind::NotConnected, "endpoint closed"));
             }
             let used = st.tick();
-            let entry = st.links.entry(to.x25519()).or_default();
-            if let Some(up) = entry.up.as_mut().filter(|u| u.connected) {
+            if let Some(up) = st.links.get_mut(&to.x25519()).and_then(|e| e.up.as_mut()).filter(|u| u.connected) {
                 up.used = used;
                 return Ok(up.mux.clone());
             }
+            let dial = st.links.get(&to.x25519()).is_none_or(|e| e.setup.is_none());
+            let setup = if dial { Some(st.reserve_dial(to, class)?) } else { None };
             let (tx, rx) = oneshot::channel();
-            entry.waiters.push(tx);
-            let dial = entry.setup.is_none();
-            if dial {
-                st.make_room(class)?;
-            }
-            (rx, dial)
+            st.links.entry(to.x25519()).or_default().waiters.push(tx);
+            (rx, setup)
         };
-        if dial {
-            self.dial(to, class).await?;
+        if let Some((session, tx, setup_rx)) = setup {
+            self.dial(to, class, session, tx, setup_rx).await?;
         }
         match timeout(DIAL_TIMEOUT, rx).await {
             Ok(Ok(mux)) => Ok(mux),
@@ -322,35 +338,41 @@ impl Inner {
         }
     }
 
-    async fn answer(self: &Arc<Self>, envelope: Vec<u8>) -> io::Result<()> {
-        let offer = Offer::receive(&self.key, &self.state.lock().unwrap().replay, &envelope, now_ms())?;
-        let class = Class::of((self.admit)(&offer.dialer))?;
-        let peer = peer(&self.signal.ice_servers(), class == Class::Relayed).await?;
-        let sdp = peer.answer(&offer.sdp).await?;
-        let (dialer, sent_ms) = (offer.dialer, offer.sent_ms);
-        let (reply, transport) = {
+    /// Answers an offer. Nothing is built until `admit` and the setup limits have accepted it, all under one lock.
+    async fn answer(self: &Arc<Self>, envelope: Vec<u8>, session: [u8; 16]) -> io::Result<()> {
+        let (offer, class, tx, rx) = {
             let mut st = self.state.lock().unwrap();
-            st.admit_inbound(self.key.public(), dialer, sent_ms, class)?;
-            let now = now_ms();
-            offer.answer(&mut st.replay, now, &sdp)?
-        };
-        let session = session_of(&envelope);
-        let (tx, rx) = unbounded();
-        {
-            let mut st = self.state.lock().unwrap();
+            if st.closed {
+                return Err(io::Error::new(io::ErrorKind::NotConnected, "endpoint closed"));
+            }
+            let offer = Offer::receive(&self.key, &st.replay, &envelope, now_ms())?;
+            let class = Class::of((self.admit)(&offer.dialer))?;
+            if st.sessions.contains_key(&session) {
+                return Err(io::Error::other("session in use"));
+            }
+            st.admit_inbound(self.key.public(), offer.dialer, offer.sent_ms, class)?;
+            let (tx, rx) = unbounded();
             let since = st.tick();
-            st.links.entry(dialer.x25519()).or_default().setup =
-                Some(Setup { session, tx: tx.clone(), dialed: false, sent_ms, class, since });
+            let setup = Setup { session, tx: tx.clone(), dialed: false, sent_ms: offer.sent_ms, class, since };
+            st.links.entry(offer.dialer.x25519()).or_default().setup = Some(setup);
             st.sessions.insert(session, tx.clone());
-        }
-        let mut link = Link::new(self.clone(), dialer, session, class, false, peer, tx.clone());
-        link.key_up(transport).await?;
-        expire_after(tx.clone(), INBOUND_TIMEOUT);
-        link.start(rx);
+            (offer, class, tx, rx)
+        };
+        let dialer = offer.dialer;
+        let peer = self.new_peer(class).await.inspect_err(|_| self.unlink(dialer, session))?;
+        let mut link = Link::new(self.clone(), dialer, session, class, false, peer, tx);
+        let reply = match link.accept_offer(offer).await {
+            Ok(reply) => reply,
+            Err(e) => {
+                link.close().await;
+                return Err(e);
+            }
+        };
         if let Err(e) = self.signal.send(dialer, reply).await {
-            let _ = tx.unbounded_send(Input::End);
+            link.close().await;
             return Err(e);
         }
+        link.start(rx);
         Ok(())
     }
 
@@ -371,9 +393,14 @@ impl Inner {
     }
 }
 
-async fn route_all(inner: Arc<Inner>) {
+/// Routes what the carrier delivers until the endpoint closes or is dropped. It holds the endpoint only weakly.
+async fn route_all(signal: Arc<dyn Signal>, inner: Weak<Inner>, mut stopped: oneshot::Receiver<()>) {
     loop {
-        let Some(envelope) = inner.signal.recv().await else {
+        let envelope = match select(signal.recv(), &mut stopped).await {
+            Either::Left((Some(envelope), _)) => envelope,
+            _ => return,
+        };
+        let Some(inner) = inner.upgrade() else {
             return;
         };
         let Some((kind, session)) = route(&envelope) else {
@@ -383,7 +410,7 @@ async fn route_all(inner: Arc<Inner>) {
             Kind::Offer => {
                 let inner = inner.clone();
                 spawn(async move {
-                    let _ = inner.answer(envelope).await;
+                    let _ = inner.answer(envelope, session).await;
                 });
             }
             Kind::Answer | Kind::Candidates => {
@@ -460,30 +487,50 @@ impl Link {
         }
     }
 
+    /// Runs the link's task. Until then nothing reads the peer's events, which wait in its queue.
     fn start(self, rx: UnboundedReceiver<Input>) {
-        let peer = self.peer.clone();
-        let tx = self.tx.clone();
-        spawn(async move {
-            while let Some(event) = peer.next().await {
-                if tx.unbounded_send(Input::Event(event)).is_err() {
-                    return;
-                }
-            }
-        });
         spawn(self.run(rx));
     }
 
     async fn run(mut self, mut rx: UnboundedReceiver<Input>) {
-        while let Some(input) = rx.next().await {
+        let mut expire = Box::pin(sleep(if self.dialed { DIAL_TIMEOUT } else { INBOUND_TIMEOUT })).fuse();
+        loop {
+            let input = match select(select(rx.next(), self.peer.next()), &mut expire).await {
+                Either::Left((Either::Left((input, _)), _)) => input,
+                Either::Left((Either::Right((event, _)), _)) => event.map(Input::Event),
+                Either::Right(_) => Some(Input::Expire),
+            };
+            let Some(input) = input else {
+                break;
+            };
             let Ok(true) = self.step(input).await else {
                 break;
             };
         }
+        self.close().await;
+    }
+
+    /// Ends the link's setup or link, and closes its peer connection.
+    async fn close(&self) {
         self.inner.unlink(self.key, self.session);
         self.peer.close().await;
         if let Some(mux) = &self.mux {
             mux.kill();
         }
+    }
+
+    async fn make_offer(&mut self) -> io::Result<Vec<u8>> {
+        let sdp = self.peer.offer().await?;
+        let (dialer, msg1) = Dialer::dial(&self.inner.key, &self.key, self.session, now_ms(), sdp)?;
+        self.dialer = Some(dialer);
+        Ok(msg1)
+    }
+
+    async fn accept_offer(&mut self, offer: Offer) -> io::Result<Vec<u8>> {
+        let sdp = self.peer.answer(&offer.sdp).await?;
+        let (reply, transport) = offer.answer(&mut self.inner.state.lock().unwrap().replay, now_ms(), &sdp)?;
+        self.key_up(transport).await?;
+        Ok(reply)
     }
 
     async fn step(&mut self, input: Input) -> io::Result<bool> {
@@ -505,7 +552,7 @@ impl Link {
             Input::Candidates(envelope) => {
                 if self.mux.is_some() {
                     self.apply_candidates(&envelope).await?;
-                } else {
+                } else if self.held.len() < MAX_HELD {
                     self.held.push(envelope);
                 }
                 Ok(true)
@@ -527,12 +574,12 @@ impl Link {
 
     async fn apply_candidates(&self, envelope: &[u8]) -> io::Result<()> {
         let mux = self.mux.as_ref().expect("candidates are applied once keyed");
-        let Ok((_, bytes)) = mux.transport().open_candidates(envelope) else {
+        let Ok(bytes) = mux.transport().open_candidates(envelope) else {
             return Ok(());
         };
         let batch: Vec<String> = ciborium::from_reader(bytes.as_slice()).map_err(io::Error::other)?;
         for candidate in batch {
-            self.peer.candidate(candidate).await?;
+            let _ = self.peer.candidate(candidate).await;
         }
         Ok(())
     }
@@ -556,8 +603,10 @@ impl Link {
                 let mux = self.mux.clone().ok_or_else(|| io::Error::other("stream event before the handshake"))?;
                 match mux.handle(event)? {
                     Some(Incoming::Hello) if !self.confirmed => {
+                        if !self.inner.confirm(self.key, self.session, self.tx.clone(), mux, self.class) {
+                            return Ok(false);
+                        }
                         self.confirmed = true;
-                        self.inner.confirm(self.key, self.session, self.tx.clone(), mux, self.class);
                     }
                     Some(Incoming::Stream(stream)) => {
                         if (self.inner.admit)(&self.key) == Admit::Refuse {
@@ -584,6 +633,7 @@ impl Endpoint {
         admit: impl Fn(&PublicKey) -> Admit + Send + Sync + 'static,
     ) -> Endpoint {
         let (accepts, accepted) = unbounded();
+        let (stop, stopped) = oneshot::channel();
         let inner = Arc::new(Inner {
             key,
             signal: Arc::new(signal),
@@ -591,8 +641,9 @@ impl Endpoint {
             accepts,
             accepted: AsyncMutex::new(accepted),
             state: Mutex::new(State::default()),
+            stop: Mutex::new(Some(stop)),
         });
-        spawn(route_all(inner.clone()));
+        spawn(route_all(inner.signal.clone(), Arc::downgrade(&inner), stopped));
         Endpoint(inner)
     }
 
@@ -632,5 +683,91 @@ impl Endpoint {
             st.links.clear();
         }
         self.0.accepts.close_channel();
+        self.0.stop.lock().unwrap().take();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fake;
+    use crate::backend::Peer;
+    use crate::handshake::{Dialer, Offer, Replay};
+
+    /// A live, idle link of `class`: a mux over a real handshake and a fake peer. The fake's other end is returned
+    /// too, since the fake fails once it is dropped.
+    async fn live_link(class: Class, used: u64) -> (Up, Arc<dyn Peer>) {
+        let (a, b) = (SecretKey::generate(), SecretKey::generate());
+        let (dialer, msg1) = Dialer::dial(&a, &b.public(), [1; 16], now_ms(), String::new()).unwrap();
+        let offer = Offer::receive(&b, &Replay::default(), &msg1, now_ms()).unwrap();
+        let (msg2, _) = offer.answer(&mut Replay::default(), now_ms(), "").unwrap();
+        let (transport, _) = dialer.finish(&msg2).map_err(|(_, e)| e).unwrap();
+        let (peer, other) = fake::pair();
+        let mux = Mux::new(peer, transport, b.public(), true, class.budget());
+        let (tx, _) = unbounded();
+        (Up { session: [used as u8; 16], tx, mux, class, used, connected: true }, other)
+    }
+
+    fn setup(class: Class, dialed: bool, since: u64) -> Setup {
+        let (tx, _) = unbounded();
+        Setup { session: [since as u8; 16], tx, dialed, sent_ms: now_ms(), class, since }
+    }
+
+    #[tokio::test]
+    async fn full_links_evict_the_least_recent_idle_one_then_refuse() {
+        let mut st = State::default();
+        let mut keys = Vec::new();
+        let mut others = Vec::new();
+        for used in 1..=LINKS as u64 {
+            let key = SecretKey::generate().public();
+            let (up, other) = live_link(Class::Direct, used).await;
+            st.links.entry(key.x25519()).or_default().up = Some(up);
+            others.push(other);
+            keys.push(key);
+        }
+        st.make_room(Class::Direct).unwrap();
+        assert!(st.links[&keys[0].x25519()].up.is_none());
+        assert!(st.links[&keys[1].x25519()].up.is_some());
+
+        let key = SecretKey::generate().public();
+        let (up, other) = live_link(Class::Direct, LINKS as u64 + 1).await;
+        st.links.entry(key.x25519()).or_default().up = Some(up);
+        others.push(other);
+        let mut busy = Vec::new();
+        for entry in st.links.values() {
+            if let Some(up) = &entry.up {
+                busy.push(up.mux.open("busy").await.unwrap());
+            }
+        }
+        assert_eq!(st.make_room(Class::Direct).unwrap_err().kind(), io::ErrorKind::ResourceBusy);
+        assert_eq!(st.make_room(Class::Relayed).unwrap_err().kind(), io::ErrorKind::ResourceBusy);
+    }
+
+    #[tokio::test]
+    async fn relayed_offers_from_fresh_keys_evict_no_direct_setup_or_link() {
+        let me = SecretKey::generate().public();
+        let mut st = State::default();
+        let direct_setup = SecretKey::generate().public();
+        st.links.entry(direct_setup.x25519()).or_default().setup = Some(setup(Class::Direct, false, 1));
+        let direct_link = SecretKey::generate().public();
+        let (up, _direct_other) = live_link(Class::Direct, 1).await;
+        st.links.entry(direct_link.x25519()).or_default().up = Some(up);
+        let mut others = Vec::new();
+        for used in 0..LINKS as u64 - 3 {
+            let key = SecretKey::generate().public();
+            let (up, other) = live_link(Class::Relayed, used).await;
+            st.links.entry(key.x25519()).or_default().up = Some(up);
+            others.push(other);
+        }
+
+        for _ in 0..50 {
+            let key = SecretKey::generate().public();
+            if st.admit_inbound(me, key, now_ms(), Class::Relayed).is_ok() {
+                let since = st.tick();
+                st.links.entry(key.x25519()).or_default().setup = Some(setup(Class::Relayed, false, since));
+            }
+        }
+        assert!(st.links[&direct_setup.x25519()].setup.is_some());
+        assert!(st.links[&direct_link.x25519()].up.is_some());
     }
 }

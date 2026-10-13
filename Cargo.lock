@@ -1568,6 +1568,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "snow",
+ "socket2",
  "tokio",
  "tokio-tungstenite",
  "wasm-bindgen",
