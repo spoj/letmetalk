@@ -25,6 +25,10 @@ impl SecretKey {
     pub fn public(&self) -> PublicKey {
         PublicKey(self.0.verifying_key())
     }
+
+    pub(crate) fn x25519_secret(&self) -> [u8; 32] {
+        self.0.to_scalar_bytes()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -33,15 +37,20 @@ pub struct PublicKey(VerifyingKey);
 impl PublicKey {
     /// Refuses keys of small order and keys with a torsion part, which snow would accept.
     pub(crate) fn from_bytes(bytes: &[u8; 32]) -> io::Result<Self> {
-        let key = VerifyingKey::from_bytes(bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let key = VerifyingKey::from_bytes(bytes).map_err(io::Error::other)?;
         if key.is_weak() || !key.to_edwards().is_torsion_free() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "weak or torsioned key",
-            ));
+            return Err(io::Error::other("weak or torsioned key"));
         }
         Ok(Self(key))
+    }
+
+    pub(crate) fn to_bytes(self) -> [u8; 32] {
+        self.0.to_bytes()
+    }
+
+    /// The X25519 key that Noise uses for this Ed25519 key.
+    pub(crate) fn x25519(&self) -> [u8; 32] {
+        self.0.to_montgomery().to_bytes()
     }
 }
 
@@ -56,10 +65,24 @@ impl FromStr for PublicKey {
 
     fn from_str(s: &str) -> io::Result<Self> {
         let mut bytes = [0; 32];
-        hex::decode_to_slice(s, &mut bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        hex::decode_to_slice(s, &mut bytes).map_err(io::Error::other)?;
         Self::from_bytes(&bytes)
     }
+}
+
+#[cfg(test)]
+pub(crate) fn torsioned() -> [u8; 32] {
+    (2..=255u8)
+        .map(|y| {
+            let mut bytes = [0; 32];
+            bytes[0] = y;
+            bytes
+        })
+        .find(|bytes| {
+            VerifyingKey::from_bytes(bytes)
+                .is_ok_and(|k| !k.is_weak() && !k.to_edwards().is_torsion_free())
+        })
+        .unwrap()
 }
 
 #[cfg(test)]
@@ -74,28 +97,14 @@ mod tests {
 
     #[test]
     fn refuses_small_order() {
-        let identity = [
-            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0,
-        ];
-        let order_four = [0; 32];
+        let mut identity = [0; 32];
+        identity[0] = 1;
         assert!(PublicKey::from_bytes(&identity).is_err());
-        assert!(PublicKey::from_bytes(&order_four).is_err());
+        assert!(PublicKey::from_bytes(&[0; 32]).is_err());
     }
 
     #[test]
     fn refuses_torsioned() {
-        let torsioned = (2..=255u8)
-            .map(|y| {
-                let mut bytes = [0; 32];
-                bytes[0] = y;
-                bytes
-            })
-            .find(|bytes| {
-                VerifyingKey::from_bytes(bytes)
-                    .is_ok_and(|k| !k.is_weak() && !k.to_edwards().is_torsion_free())
-            })
-            .unwrap();
-        assert!(PublicKey::from_bytes(&torsioned).is_err());
+        assert!(PublicKey::from_bytes(&torsioned()).is_err());
     }
 }
