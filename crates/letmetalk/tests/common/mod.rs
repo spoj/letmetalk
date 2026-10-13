@@ -86,7 +86,7 @@ impl Signal for Carrier {
 /// Echoes every stream that `b` accepts, once its sender has finished.
 pub async fn serve(b: Endpoint) {
     while let Some(mut stream) = b.accept().await {
-        tokio::spawn(async move {
+        n0_future::task::spawn(async move {
             let mut data = Vec::new();
             stream.read_to_end(&mut data).await.unwrap();
             stream.write_all(&data).await.unwrap();
