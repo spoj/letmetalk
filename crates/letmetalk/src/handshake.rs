@@ -395,6 +395,18 @@ mod tests {
     }
 
     #[test]
+    fn answer_under_other_kem_key_fails() {
+        let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
+        let (mut dialer, msg1) = dial(&alice, &bob, NOW);
+        let (msg2, _) = Offer::receive(&bob, &Replay::default(), &msg1, NOW)
+            .unwrap()
+            .answer(&mut Replay::default(), NOW, "answer")
+            .unwrap();
+        dialer.decaps = MlKem768::generate_keypair().0;
+        assert!(dialer.finish(&msg2).is_err());
+    }
+
+    #[test]
     fn tampered_message1_fails() {
         let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
         let (_, msg1) = dial(&alice, &bob, NOW);
