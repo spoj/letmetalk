@@ -547,6 +547,25 @@ fine.
   firewall opens those ports for the trial.
 - TURN over TLS on 443 is therefore tested only in the lab.
 
+**Deployed,** by `deploy/signal.sh root@129.212.227.207` (rerun to update). The VPS runs Ubuntu 24.04 with coturn 4.6.1
+from apt; the repo's tests run 4.18.
+- **Ports:**
+  - forwarder: TCP 8443, `wss://relay.letmeknow.dev:8443/ws`;
+  - member: TCP and UDP 3478, TLS 5349; relays UDP 49152–50151;
+  - stranger: TCP and UDP 3479, TLS 5350; relays UDP 50152–50351.
+  - coturn also binds its alternate ports, 3488/5358 (member) and 3489/5359 (stranger). Clients never use them.
+- **Units:** `letmetalk-forwarder`, `letmetalk-turn@member`, `letmetalk-turn@stranger`, all as user `letmetalk`, and
+  `letmetalk-tls-sync.timer`, which runs daily.
+- **Files:** `/usr/local/bin/letmetalk-signal`; `/etc/letmetalk/{member,stranger}.secret` (made once, root only);
+  `coturn/{member,stranger}.conf` (the repo's configs, plus ports, relays, cert, secret, `bps-capacity` and the host's
+  own addresses as denied peers); `forwarder.env` (the secrets, as `MEMBER_SECRET` and `STRANGER_SECRET`);
+  `allowlist`, seeded with `deploy/check.pub` once, then owned by the owner; `tls/{cert,key}.pem`, split from letmeknow's
+  cached ACME PEM by `/usr/local/sbin/letmetalk-tls-sync`, which restarts ours when the certificate changed.
+- **Deviations:** `bps-capacity` is 125000000 on both instances, not 12500000. On coturn 4.6.1, an allocation reserves
+  `max-bps`, so a capacity equal to it refused every allocation. The member instance now takes 10 relays at once.
+- **Open in the cloud firewall:** TCP 8443, 3478, 3479, 5349 and 5350; UDP 3478, 3479 and 49152–50351. Relays need
+  their UDP range open to peers, not only the listeners.
+
 Each pair runs both letmetalk and iroh.
 
 ### Decision
