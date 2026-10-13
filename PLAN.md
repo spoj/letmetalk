@@ -142,8 +142,8 @@ impl WsSignal {  // feature "ws"
     pub fn new(url: &str, key: &SecretKey) -> WsSignal;
 }
 ```
-- `letmetalk::ws::wire` (feature `ws`) is public, so that `letmetalk-signal` shares the frames and the login with the
-  client. It is not part of the stable API.
+- `letmetalk::ws::wire` (feature `ws`) is `#[doc(hidden)]`: the frames and login that `letmetalk-signal` shares with the
+  client. It is internal, not API.
 
 - **Admission rules.**
   - `admit` is checked when a link forms. Once a key is refused, its link closes at its next incoming stream.
@@ -368,36 +368,52 @@ it later.
 
 - **Login, deniable.**
   - The server sends a fresh X25519 key.
-  - The client answers with its Ed25519 key and a MAC: keyed BLAKE2s over `letmetalk-signal/1 ‖ host`. The MAC key is
-    derived, through a labelled KDF, from the Diffie–Hellman of the client's X25519-mapped key and the server's fresh
-    key.
+  - The client answers with its Ed25519 key and a MAC: keyed BLAKE2s over `letmetalk-signal/1 ‖ Ed25519 ‖ host`. The MAC
+    key is derived, through a labelled KDF, from the Diffie–Hellman of the client's X25519-mapped key and the server's
+    fresh key.
   - The server checks the MAC with its side of the same Diffie–Hellman. A record of the login proves nothing to
     anyone else, since the server could have computed the MAC itself.
-  - The host is in the MAC, so a login cannot be relayed to another server. All-zero Diffie–Hellman results are
-    refused.
+  - The host is in the MAC, so a login cannot be relayed to another server. The host is lowercased first. The MAC covers
+    the Ed25519 key too, so a login claiming −A fails unless its holder can make the MAC for −A.
+  - All-zero Diffie–Hellman results are refused. Small-order and torsioned keys are refused before the Diffie–Hellman.
   - Wire, in `letmetalk::ws::wire`: the challenge is 32 raw bytes, the first message from the server. The client
     answers with `Ed25519 (32) ‖ MAC (32)`. The MAC is BLAKE2s-MAC, keyed with `BLAKE2s("letmetalk-signal/1 key" ‖
-    DH)`, over `letmetalk-signal/1 ‖ host`. The host is the URL's host name without port. The socket is `/ws`. A bad
-    login gets no reply: the server closes the socket.
+    DH)`, over `letmetalk-signal/1 ‖ Ed25519 ‖ host`. The host is the URL's host name without port, lowercased. The socket
+    is `/ws`. A bad login gets no reply: the server closes the socket.
+  - Sessions and routing are keyed by the X25519 key, so A and −A are one login.
   - `WsSignal` connects over `wss://` only, except to loopback. Any other URL stops it at once: `recv` returns None
-    and `send` fails with `NotConnected`. Otherwise it reconnects after 2 s.
+    and `send` fails with `NotConnected`.
+- **Liveness.**
+  - The server pings every 5 s. Either side treats a socket silent for 15 s as dead: the server closes it, and
+    `WsSignal` reconnects.
+  - Every server write times out after 10 s, so a client that never reads cannot pin its task.
+  - Connect and login each have a 10 s timeout on the client, which reconnects after one.
+  - `WsSignal` reconnects after 2 s plus 0–2 s of jitter, so clients do not stampede a restarted forwarder.
+- **Sockets.** Upgrades get a 16 KiB read buffer. A frame or message over 8 KiB + 36 bytes closes the socket. Each IP,
+  with IPv6 taken by its /64, may hold 64 sockets. The 65th upgrade gets HTTP 429.
 - **TURN credentials.**
-  - The login's reply carries the ICE servers, with TURN credentials in the TURN REST form, valid for 24 h.
-  - Two coturn instances, each with its own secret. `member` gives full credentials to members: the keys on the
-    allowlist, or every key when there is none. `stranger` gives everyone else a small quota: low `user-quota`,
-    `total-quota` and `max-bps`. Under REST auth coturn can't tell users apart, so the quota is per instance. A
-    stranger that logs in again gets a fresh token and so a fresh per-user quota; `total-quota` bounds the instance.
+  - The login's reply carries the ICE servers, with TURN credentials in the TURN REST form, valid for 24 h
+    (`--turn-ttl`). They are renewed over the socket at half their life.
+  - Two coturn instances, each with its own secret. `member` gives full credentials, and only to keys on the allowlist.
+    Every other key gets `stranger`, even when there is no allowlist. `stranger` has a low `user-quota`, `total-quota`
+    and `max-bps`. Under REST auth coturn can't tell users apart, so the quota is per instance: `total-quota` bounds the
+    instance, and a stranger that logs in again gets a fresh token and so a fresh per-user quota.
+  - Member limits: `total-quota=1000`, `max-bps` and `bps-capacity` 12500000 bytes/s. Stranger limits: `user-quota=2`,
+    `total-quota=100`, `max-bps=125000` bytes/s.
   - A stranger dialing a member needs no TURN of its own, since the member's relay candidate reaches it.
-  - The username is `expiry:token`, with a random 128-bit token (hex) per login. The forwarder keeps token→key in
-    memory to attribute usage (`Forwarder::key_of`), and drops entries at expiry. TURN sends usernames in the clear, so
-    a key would put identities on the wire.
+  - The username is `expiry:token`, with a random 128-bit token (hex) per credential. The forwarder logs one line per
+    credential it mints, `token <hex> key <key>`, which attributes coturn's usage logs. It keeps nothing. TURN sends
+    usernames in the clear, so a key never goes in one.
   - The password is base64 of HMAC-SHA1 over the username, under the secret of the instance it is for. The forwarder
-    shares that secret with coturn. Credentials are renewed every 12 h over the socket.
+    shares that secret with coturn.
 - **coturn hardening.** `crates/letmetalk-signal/coturn/member.conf` and `stranger.conf` are the trial's coturn configs,
-  without secrets. Both deny peers in loopback, private, link-local, shared-address, multicast and cloud-metadata ranges,
-  and set `no-multicast-peers`. `stranger.conf` adds the quotas. Without these, a peer's candidates could aim the TURN
-  server at internal addresses (the known TURN SSRF class). In coturn 4.18 a denied `::`, even alone, refuses every
-  IPv4 peer, so the configs leave the unspecified IPv6 address out. `max-bps` counts bytes per second.
+  without secrets. Both set `no-multicast-peers`, `no-tcp-relay` and `no-cli`. Both deny peers in loopback, private,
+  link-local, shared-address, multicast, cloud-metadata, and IPv4-mapped, NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`) and
+  6to4 ranges by explicit ranges, so the configs rely on no coturn version decoding mapped addresses. Without these, a
+  peer's candidates could aim the TURN server at internal addresses (the known TURN SSRF class). A deployment also denies
+  the host's own IPv4 and IPv6 addresses: a relay to them reaches the forwarder and the other coturn. In coturn 4.18 a
+  denied `::`, even alone, refuses every IPv4 peer, so the configs leave the unspecified IPv6 address out. The configs
+  were run on coturn 4.18, and CI prints the version it runs.
 - **One login per key.** A new login replaces the old one. The replaced socket is sent `5` and closed, and `WsSignal`
   does not reconnect it, so two processes with one key don't evict each other in a loop.
 - **Frames.** Integers are big-endian.
@@ -409,22 +425,24 @@ it later.
     - `3 ‖ id`: over a limit;
     - `4 ‖ ICE servers`: the login reply, and renewed credentials (CBOR);
     - `5`: this key logged in elsewhere. The socket closes after it.
+  - Ping and pong frames count against the login's bucket, and close the socket when it is empty. A text frame closes it.
   - `WsSignal::send` resolves on `1`, `2` or `3`. `2` becomes `HostUnreachable`, `3` becomes `ResourceBusy`, and a
     socket lost before its ack becomes `NotConnected`.
-  - `send` refuses an envelope over 8 KiB with `InvalidInput`. The server closes a socket that sends a frame over
-    8 KiB + 36 bytes.
+  - `send` refuses an envelope over 8 KiB with `InvalidInput`.
 - **Limits.**
   - Envelopes of up to 8 KiB. An offer or answer is about 3 KB, ML-KEM included.
   - Token-bucket rates, provisional constants in `lib.rs` until a measured startup of an endpoint dialing 20 peers can
     size them (that needs step 2's `Endpoint`):
     - per login, which is per socket: 50/s, burst 200;
-    - per IP: 200/s, burst 800;
-    - for a non-member only, per recipient: 1/s, burst 5.
-  - Over a limit the sender gets `3`.
+    - per IP (IPv6 by its /64): 200/s, burst 800, charged for each login and each message;
+    - for a non-member only, per login and recipient: 1/s, burst 5. The per-IP bucket bounds the total across a host's
+      logins.
+  - Over a limit the sender gets `3`. A login over the per-IP bucket gets no reply, and its socket closes.
   - Nothing is stored.
 - **Presence.** `2 ‖ id` tells any logged-in key whether another key is online. Run with an allowlist to keep that
   among known keys. Embedded in letmeknow's service, it would forward only between members of a group.
-  - Members are the keys on the allowlist. Without one, every key is a member: an open forwarder.
+  - Members are the keys on the allowlist. Without one, every key is a routing member: an open forwarder, which gives
+    every key stranger TURN only.
   - A non-member gets `1` for every recipient, online or not, so it never learns presence. Its envelopes to offline
     members are dropped.
 
@@ -570,10 +588,12 @@ Each step lands with its tests and keeps the checks in AGENTS.md green.
    - a stalled reader on one stream while another stream and the control channel keep moving;
    - 256 MiB to a slow reader, in bounded memory.
 3. **`letmetalk-signal` and native `WsSignal`.** Tests:
-   - login with a bad MAC, a wrong host and an all-zero Diffie–Hellman;
+   - login with a bad MAC, a wrong host, an all-zero Diffie–Hellman, a small-order or torsioned key, and a negated key;
+   - a 65th socket from one IP refused;
    - `ws://` refused except to loopback;
-   - TURN credentials against a coturn the test starts: tokens, not keys, in usernames; the small quota for keys
-     outside the allowlist; a peer address in a private range refused;
+   - TURN credentials against a coturn the test starts: tokens, not keys, in usernames; member credentials only for
+     allowlisted keys; the small quota for keys outside the allowlist; `total-quota`; a peer address in a private
+     range, a mapped or a NAT64 one refused;
    - routing and its acks;
    - an offline recipient;
    - limits;

@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 
 use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
@@ -32,23 +33,28 @@ struct Args {
     stranger_turn: Vec<String>,
     #[arg(long)]
     stranger_secret: String,
-    /// Hex keys, one per line. Without a file every key is a member.
+    /// Hex keys, one per line. Listed keys get member TURN; without a file every key is a routing member
+    /// and gets stranger TURN.
     #[arg(long)]
     allowlist: Option<PathBuf>,
-}
-
-fn read_allowlist(path: &Path) -> io::Result<HashSet<PublicKey>> {
-    std::fs::read_to_string(path)?
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| PublicKey::from_str(line.trim()))
-        .collect()
+    /// Lifetime of TURN credentials in seconds. They are renewed at half their life.
+    #[arg(long, default_value_t = 24 * 3600)]
+    turn_ttl: u64,
 }
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let args = Args::parse();
-    let allowlist = args.allowlist.as_deref().map(read_allowlist).transpose()?;
+    let allowlist = match args.allowlist {
+        Some(path) => Some(
+            std::fs::read_to_string(path)?
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| PublicKey::from_str(line.trim()))
+                .collect::<io::Result<HashSet<_>>>()?,
+        ),
+        None => None,
+    };
     let forwarder = Forwarder::new(Config {
         host: args.host,
         allowlist,
@@ -60,6 +66,7 @@ async fn main() -> io::Result<()> {
             urls: args.stranger_turn,
             secret: args.stranger_secret,
         },
+        turn_ttl: Duration::from_secs(args.turn_ttl),
     });
     let app = forwarder
         .router()
