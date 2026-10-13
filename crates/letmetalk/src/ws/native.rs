@@ -182,6 +182,7 @@ async fn session(
                     Ok(Down::Offline(id)) => ack(&mut pending, id, Err(io::ErrorKind::HostUnreachable.into())),
                     Ok(Down::Limited(id)) => ack(&mut pending, id, Err(io::ErrorKind::ResourceBusy.into())),
                     Ok(Down::Ice(ice)) => *shared.ice.lock().unwrap() = ice,
+                    Ok(Down::Alive) => {}
                     Ok(Down::Replaced) => break Ended::Replaced,
                     Err(_) => break Ended::Dropped,
                 }

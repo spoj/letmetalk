@@ -396,8 +396,9 @@ it later.
   - `WsSignal` connects over `wss://` only, except to loopback. Any other URL stops it at once: `recv` returns None
     and `send` fails with `NotConnected`.
 - **Liveness.**
-  - The server pings every 5 s. Either side treats a socket silent for 15 s as dead: the server closes it, and
-    `WsSignal` reconnects.
+  - The server pings every 5 s and sends frame `6` with each ping. Browsers answer pings without showing them to JS, so
+    a browser sees only `6`. Both clients count any frame as traffic. Either side treats a socket silent for 15 s as
+    dead: the server closes it, and `WsSignal` reconnects.
   - Every server write times out after 10 s, so a client that never reads cannot pin its task.
   - Connect and login each have a 10 s timeout on the client, which reconnects after one.
   - `WsSignal` reconnects after 2 s plus 0–2 s of jitter, so clients do not stampede a restarted forwarder.
@@ -437,6 +438,7 @@ it later.
     - `3 ‖ id`: over a limit;
     - `4 ‖ ICE servers`: the login reply, and renewed credentials (CBOR);
     - `5`: this key logged in elsewhere. The socket closes after it.
+    - `6`: alive. Sent with each server ping, so that browsers, which see no pings, see traffic every 5 s.
   - Ping and pong frames count against the login's bucket, and close the socket when it is empty. A text frame closes it.
   - `WsSignal::send` resolves on `1`, `2` or `3`. `2` becomes `HostUnreachable`, `3` becomes `ResourceBusy`, and a
     socket lost before its ack becomes `NotConnected`.
