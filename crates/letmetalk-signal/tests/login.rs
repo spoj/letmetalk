@@ -1,5 +1,7 @@
 mod common;
 
+use std::time::Duration;
+
 use common::*;
 use ed25519_dalek::VerifyingKey;
 use futures::{SinkExt, StreamExt};
@@ -90,4 +92,24 @@ async fn refuses_a_65th_socket_from_one_ip() {
         refused,
         tungstenite::Error::Http(response) if response.status() == StatusCode::TOO_MANY_REQUESTS
     ));
+}
+
+#[tokio::test]
+async fn sends_an_alive_frame_with_each_ping() {
+    let url = spawn(None, no_turn(), no_turn()).await;
+    let (mut ws, _) = connect_async(&url).await.unwrap();
+    let Some(Ok(Message::Binary(challenge))) = ws.next().await else {
+        panic!("no challenge");
+    };
+    let login = wire::answer(&key(1), HOST, &challenge).unwrap();
+    ws.send(Message::Binary(login.to_vec().into())).await.unwrap();
+    let alive = tokio::time::timeout(Duration::from_secs(6), async {
+        while let Some(Ok(message)) = ws.next().await {
+            if matches!(&message, Message::Binary(frame) if matches!(Down::decode(frame), Ok(Down::Alive))) {
+                return true;
+            }
+        }
+        false
+    });
+    assert!(alive.await.expect("an alive frame within 6 s"));
 }

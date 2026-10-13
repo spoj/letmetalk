@@ -290,7 +290,8 @@ impl WsSignal {  // feature "ws"
 
 - **Channels.** Each stream is one data channel, reliable and ordered, opened in band (DCEP).
   - Native closes wait until SCTP has acknowledged what was sent. webrtc-rs's close can overtake data still in flight,
-    so the peer then loses the final `Finish`.
+    so the peer then loses the final `Finish`. A browser's close waits until `bufferedAmount` is 0, since browsers expose
+    no acknowledgements.
   - Streams open only once the link is confirmed. That also avoids a webrtc-rs bug: a channel the answering side opens
     just after ICE connects, before SCTP is up, never opens.
   - A browser opener writes at once. A native opener waits for the peer's DCEP ack.
@@ -335,6 +336,8 @@ impl WsSignal {  // feature "ws"
     an endpoint hold is bounded by its link's budget.
   - **On native,** the sender also caps each channel's send buffer and waits on `writable()`. webrtc-rs's
     `OnBufferedAmountLow` proved unreliable: it fired with 3 MB still queued.
+  - **In browsers,** the sender waits while `bufferedAmount` is 1 MiB or more, and resumes on `bufferedamountlow`, set
+    at 512 KiB.
   - **Draining.** Every stream's unread data stays within its window, so letmetalk always drains the link at once.
   - **Throughput limit.** A window caps a stream at window ÷ RTT. 1 MiB covers about 80 Mbit/s at 100 ms; quinn's
     default is 1.25 MB. The bench records whether a run was limited by its window.
@@ -365,6 +368,8 @@ impl WsSignal {  // feature "ws"
 - **Browser: the browser's own WebRTC,** through web-sys (`RtcPeerConnection`, `RtcDataChannel`).
   - The browser runs ICE, DTLS and SCTP. letmetalk adds the handshake, encryption, flow control and link management.
   - Browsers expose `RTCPeerConnection` in windows, not in workers. letmeknow's node already runs in the window.
+  - The peer connection gets the carrier's ICE servers, and `iceTransportPolicy: relay` for Relayed keys. Candidates
+    go in with mid `0` and index 0, as on native.
   - web-sys lacks a few getters (`pc.sctp`) and `restartIce`. `js_sys::Reflect` reaches them if needed.
   - On wasm:
     - snow runs with its default features off, since they pull in ring and getrandom 0.2, which fail there.
@@ -396,8 +401,9 @@ it later.
   - `WsSignal` connects over `wss://` only, except to loopback. Any other URL stops it at once: `recv` returns None
     and `send` fails with `NotConnected`.
 - **Liveness.**
-  - The server pings every 5 s. Either side treats a socket silent for 15 s as dead: the server closes it, and
-    `WsSignal` reconnects.
+  - The server pings every 5 s and sends frame `6` with each ping. Browsers answer pings without showing them to JS, so
+    a browser sees only `6`. Both clients count any frame as traffic. Either side treats a socket silent for 15 s as
+    dead: the server closes it, and `WsSignal` reconnects.
   - Every server write times out after 10 s, so a client that never reads cannot pin its task.
   - Connect and login each have a 10 s timeout on the client, which reconnects after one.
   - `WsSignal` reconnects after 2 s plus 0–2 s of jitter, so clients do not stampede a restarted forwarder.
@@ -437,6 +443,7 @@ it later.
     - `3 ‖ id`: over a limit;
     - `4 ‖ ICE servers`: the login reply, and renewed credentials (CBOR);
     - `5`: this key logged in elsewhere. The socket closes after it.
+    - `6`: alive. Sent with each server ping, so that browsers, which see no pings, see traffic every 5 s.
   - Ping and pong frames count against the login's bucket, and close the socket when it is empty. A text frame closes it.
   - `WsSignal::send` resolves on `1`, `2` or `3`. `2` becomes `HostUnreachable`, `3` becomes `ResourceBusy`, and a
     socket lost before its ack becomes `NotConnected`.
@@ -613,9 +620,12 @@ Each step lands with its tests and keeps the checks in AGENTS.md green.
    - two endpoints connecting through it. Skipped: it needs step 2's `Endpoint`.
 
    The limits are provisional here, sized once step 2 exists.
-4. **Browser backend and wasm `WsSignal`.** wasm-bindgen tests in headless Chromium, run in CI:
-   - browser↔browser within one page;
-   - browser↔native through a forwarder the test starts.
+4. **Browser backend and wasm `WsSignal`.** wasm-bindgen tests in headless Chromium, run in CI by
+   `scripts/browser-tests.sh`. The script starts a forwarder and a native echo endpoint on loopback, and builds the tests
+   with their URL and key in `LETMETALK_TEST_SIGNAL` and `LETMETALK_TEST_ECHO`.
+   - browser↔browser within one page, with 8 MiB one way, and a relayed dial with no relay forms no link;
+   - browser↔native through the forwarder, in both directions;
+   - a plain `ws://` to a remote host is refused.
 5. **Bench** (`crates/bench`): a native binary and a browser page. They:
    - echo, time setup, and measure bulk throughput and latency under load;
    - micro-benchmark the encryption;

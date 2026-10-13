@@ -18,7 +18,7 @@ hmac = "0.12"
 letmetalk = { path = "../letmetalk", features = ["ws"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 sha1 = "0.10"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time", "fs"] }
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "net", "sync", "time", "fs"] }
 
 [dev-dependencies]
 ed25519-dalek = "3"

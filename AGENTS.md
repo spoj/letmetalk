@@ -8,3 +8,5 @@ Commit subjects read `Area: what changed`.
     cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace
     cargo clippy -p letmetalk --target wasm32-unknown-unknown -- -D warnings
+    cargo clippy -p letmetalk --features ws --target wasm32-unknown-unknown -- -D warnings
+    scripts/browser-tests.sh

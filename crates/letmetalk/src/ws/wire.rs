@@ -23,6 +23,7 @@ pub enum Down {
     Limited(u32),
     Ice(Vec<IceServer>),
     Replaced,
+    Alive,
 }
 
 impl Down {
@@ -38,6 +39,7 @@ impl Down {
                 out
             }
             Self::Replaced => vec![5],
+            Self::Alive => vec![6],
         }
     }
 
@@ -59,6 +61,7 @@ impl Down {
                 ciborium::from_reader(cbor).map_err(io::Error::other)?,
             )),
             (5, []) => Ok(Self::Replaced),
+            (6, []) => Ok(Self::Alive),
             _ => Err(io::Error::other("unknown frame")),
         }
     }
@@ -249,6 +252,7 @@ mod tests {
             Down::Offline(2),
             Down::Limited(3),
             Down::Replaced,
+            Down::Alive,
         ] {
             assert_eq!(
                 Down::decode(&down.encode()).unwrap().encode(),
