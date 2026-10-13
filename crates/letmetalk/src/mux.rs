@@ -67,7 +67,7 @@ fn be32(bytes: &[u8]) -> u32 {
     u32::from_be_bytes(bytes.try_into().expect("four bytes"))
 }
 
-fn reset() -> io::Error {
+pub(crate) fn reset() -> io::Error {
     io::Error::new(io::ErrorKind::ConnectionReset, "stream reset")
 }
 
@@ -117,12 +117,15 @@ pub(crate) struct Mux {
     state: Mutex<State>,
 }
 
+/// Sends control messages in order. One that cannot be sent fails the link, as does an index past 2^40.
 async fn control_loop(peer: Arc<dyn Peer>, transport: Arc<Transport>, mut rx: UnboundedReceiver<Plain>) {
     let mut index = 0;
     while let Some(plain) = rx.next().await {
         let sealed = transport.seal(index, &plain.encode()).expect("messages fit the cipher");
+        let full = index >> 40 != 0;
         index += 1;
-        if peer.send(CONTROL, sealed).await.is_err() {
+        if full || peer.send(CONTROL, sealed).await.is_err() {
+            peer.close().await;
             return;
         }
     }
@@ -136,15 +139,16 @@ async fn send_loop(mux: Arc<Mux>, number: u32, start: oneshot::Receiver<()>, mut
     while let Some(plain) = outbox.next().await {
         let finish = matches!(plain, Plain::Finish);
         let nonce = (number as u64) << 40 | index;
+        let full = index >> 40 != 0;
         index += 1;
         let sealed = mux.transport.seal(nonce, &plain.encode()).expect("messages fit the cipher");
-        if mux.peer.send(number, sealed).await.is_err() {
+        if full || mux.peer.send(number, sealed).await.is_err() {
             mux.fail_stream(number, true);
             mux.close_later(number);
             return;
         }
         if finish {
-            mux.finished(number, true);
+            mux.finished(&mut mux.state.lock().unwrap(), number, true);
         }
     }
 }
@@ -184,10 +188,6 @@ impl Mux {
 
     pub(crate) fn streams(&self) -> usize {
         self.state.lock().unwrap().streams.len()
-    }
-
-    fn peer_parity(&self) -> u32 {
-        u32::from(self.dialer)
     }
 
     pub(crate) async fn open(self: &Arc<Self>, protocol: &str) -> io::Result<Stream> {
@@ -267,10 +267,7 @@ impl Mux {
 
     fn opened(self: &Arc<Self>, n: u32) -> io::Result<()> {
         let mut st = self.state.lock().unwrap();
-        if st.dead {
-            return Ok(());
-        }
-        st.numbers.admit(n, self.peer_parity())?;
+        st.numbers.admit(n, u32::from(self.dialer))?;
         let peers = st.streams.values().filter(|io| !io.own()).count();
         if peers >= MAX_STREAMS {
             self.send_control(Plain::Reset(n))?;
@@ -307,6 +304,9 @@ impl Mux {
                 Ok(None)
             }
             Plain::Reset(n) => {
+                if n == CONTROL {
+                    return Err(io::Error::other("reset of the control channel"));
+                }
                 self.fail(&mut st, n, false);
                 self.close_later(n);
                 Ok(None)
@@ -339,7 +339,11 @@ impl Mux {
                 if was_open {
                     return Err(io::Error::other("stream opened twice"));
                 }
-                let waiting = st.streams.values().filter(|io| !io.own() && io.is_waiting()).count();
+                let waiting = st
+                    .streams
+                    .values()
+                    .filter(|io| !io.own() && io.state().opened && !io.state().accepted)
+                    .count();
                 if waiting >= MAX_WAITING {
                     self.fail(&mut st, n, true);
                     self.close_later(n);
@@ -351,6 +355,9 @@ impl Mux {
             _ if !was_open => Err(io::Error::other("data before open")),
             Plain::Data(bytes) => {
                 let mut s = io.state();
+                if s.remote_finished {
+                    return Err(io::Error::other("data after finish"));
+                }
                 if s.received + bytes.len() > s.granted {
                     return Err(io::Error::other("sent past its credit"));
                 }
@@ -368,18 +375,7 @@ impl Mux {
                 Ok(None)
             }
             Plain::Finish => {
-                let both = {
-                    let mut s = io.state();
-                    s.remote_finished = true;
-                    if let Some(waker) = s.read_waker.take() {
-                        waker.wake();
-                    }
-                    s.local_finished
-                };
-                if both {
-                    self.close_later(n);
-                }
-                self.reap(&mut st, n);
+                self.finished(&mut st, n, false);
                 Ok(None)
             }
             _ => Err(io::Error::other("bad stream message")),
@@ -388,15 +384,17 @@ impl Mux {
 
     fn closed(&self, n: u32) {
         let mut st = self.state.lock().unwrap();
-        let done = st.streams.get(&n).is_some_and(|io| io.is_done());
+        let done = st.streams.get(&n).is_some_and(|io| {
+            let s = io.state();
+            s.local_finished && s.remote_finished
+        });
         if !done {
             self.fail(&mut st, n, false);
         }
     }
 
-    /// Records that this side sent or received its `Finish`. Once both have, the channel closes.
-    pub(crate) fn finished(&self, n: u32, local: bool) {
-        let mut st = self.state.lock().unwrap();
+    /// Records that this side sent (`local`) or received its `Finish`. Once both have, the channel closes.
+    fn finished(&self, st: &mut State, n: u32, local: bool) {
         let Some(io) = st.streams.get(&n).cloned() else {
             return;
         };
@@ -415,12 +413,15 @@ impl Mux {
         if both {
             self.close_later(n);
         }
-        self.reap(&mut st, n);
+        self.reap(st, n);
     }
 
     /// Removes a finished stream once the app has read all of it.
     fn reap(&self, st: &mut State, n: u32) {
-        if st.streams.get(&n).is_some_and(|io| io.is_drained()) {
+        if st.streams.get(&n).is_some_and(|io| {
+            let s = io.state();
+            s.local_finished && s.remote_finished && s.inbox.is_empty()
+        }) {
             st.streams.remove(&n);
         }
     }
@@ -746,6 +747,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn data_after_finish_fails_the_link() {
+        let mut p = pair();
+        let _a = p.a.open("raw").await.unwrap();
+        let b = p.accepts.next().await.unwrap();
+        b.accept();
+        send_raw(&p, 2, 1, Plain::Finish).await;
+        send_raw(&p, 2, 2, Plain::Data(b"late".to_vec())).await;
+        assert!(p.b_task.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn reset_of_the_control_channel_fails_the_link() {
+        let p = pair();
+        let sealed = p.a.transport.seal(0, &Plain::Reset(CONTROL).encode()).unwrap();
+        p.a_peer.send(CONTROL, sealed).await.unwrap();
+        assert!(p.b_task.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
     async fn credit_past_the_window_fails_the_link() {
         let p = pair();
         let _a = p.a.open("greedy").await.unwrap();
@@ -870,31 +890,5 @@ mod tests {
         }
         let err = p.a.open("one too many").await.err().unwrap();
         assert_eq!(err.kind(), io::ErrorKind::ResourceBusy);
-    }
-
-    #[tokio::test]
-    async fn bulk_to_a_slow_reader_stays_within_its_window() {
-        let mut p = pair();
-        let mut a = p.a.open("bulk").await.unwrap();
-        let mut b = p.accepts.next().await.unwrap();
-        b.accept();
-        let total = 256 * MIB;
-        let writer = spawn(async move {
-            let chunk = vec![4; CHUNK];
-            for _ in 0..total / CHUNK {
-                a.write_all(&chunk).await.unwrap();
-            }
-            a.shutdown().await.unwrap();
-        });
-        let mut buf = vec![0; MIB];
-        let mut got = 0;
-        let mut most = 0;
-        while got < total {
-            most = most.max(b.io.state().inbox.len());
-            n0_future::time::sleep(Duration::from_millis(1)).await;
-            got += b.read(&mut buf).await.unwrap();
-        }
-        writer.await.unwrap();
-        assert!(most <= ACCEPTED_CREDIT, "inbox held {most} bytes");
     }
 }

@@ -155,6 +155,7 @@ impl WsSignal {  // feature "ws"
   - `TimedOut`: no link formed within 15 s. A refusal looks the same, since refusals are silent.
   - `ResourceBusy`: no new link fits, because every link at the cap holds streams.
   - `ConnectionReset`: the stream, or its link, died, was reset, or failed to decrypt.
+  - `Unsupported`: a relayed link was asked for, and the carrier gave no TURN server.
 - **Streams.** Dropping a stream before `shutdown` resets it; after `shutdown`, it discards what the peer still sends until
   the peer finishes, so the peer can finish. To refuse an unknown protocol, the accepter drops the
   stream.
@@ -245,7 +246,7 @@ impl WsSignal {  // feature "ws"
     - drops anything it cannot open;
     - applies `admit`, and a refusal gets no reply;
     - does the same with an answer in message 2, then its own candidates.
-  - Candidates that arrive early are held until they can be applied.
+  - Candidates that arrive early are held, up to 16, until they can be applied.
 - **Connect.** `connect` uses a confirmed link if one is live. Otherwise it waits for the setup already under way to
   that key, or starts one. A setup that ends without a link fails the waiting `connect` with `TimedOut`.
 - **Confirmation.** When its control channel opens (the dialer's own open, the accepter's when the dialer's arrives),
@@ -299,7 +300,8 @@ impl WsSignal {  // feature "ws"
 - **Numbers.** Streams are numbered by letmetalk, not by channel id, since webrtc-rs's `id()` is only a local handle.
   - The link's dialer opens even numbers and its accepter odd ones. Numbers are never reused on a link, and an open
     past the 24-bit range fails with `ResourceBusy` (about 2²³ streams from one side).
-  - Stream 0 is the control channel. Number 2²⁴−1 is reserved for `Candidates` envelopes.
+  - Stream 0 is the control channel, and it opens once: a second open fails the link. Number 2²⁴−1 is reserved for
+    `Candidates` envelopes.
   - The DCEP label carries the number. The protocol name travels encrypted in the stream's first message, which also
     sidesteps web-sys having no getter for a channel's protocol.
   - **Checks on each open by the peer.** The number must:
@@ -315,11 +317,13 @@ impl WsSignal {  // feature "ws"
     key of its direction.
   - Its nonce is the stream's number (24 bits) and the message's index on that stream (40 bits). Channels deliver in
     order and lose nothing, so the nonce is implicit.
-  - A replayed, reordered, dropped or moved message fails to open, and fails its stream.
+  - A replayed, reordered, dropped or moved message fails to open, and fails its stream. A sender whose index would
+    pass 2⁴⁰ fails the stream, or the link on the control channel.
   - Since numbers are never reused, and the peer's are checked, no nonce repeats under a key.
 - **Messages.** Plaintexts start with a type:
   - on a stream: `Open(protocol)` (the first message), `Data`, `Finish`;
   - on the control channel: `Hello`, `Credit(stream, bytes)`, `Reset(stream)`.
+  - A `Data` after the peer's `Finish`, and a `Reset` of the control channel, fail the link.
 
   Data goes in messages of at most 16 KiB, so a small message on one stream never waits behind a large one on another.
   Data channels have no half-close, so `Finish` stands in for one, and a channel closes once both sides have finished.

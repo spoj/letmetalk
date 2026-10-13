@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use futures::FutureExt;
@@ -30,6 +30,7 @@ const DIRECT_SETUPS: usize = 16;
 const RELAYED_SETUPS: usize = 8;
 const DIRECT_BUDGET: usize = 4 << 20;
 const RELAYED_BUDGET: usize = 256 << 10;
+const MAX_HELD: usize = 16;
 
 /// What this endpoint does with a key: refuse it, or link to it relayed or directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,6 +219,7 @@ struct Inner {
     accepts: UnboundedSender<Stream>,
     accepted: AsyncMutex<UnboundedReceiver<Stream>>,
     state: Mutex<State>,
+    stop: Mutex<Option<oneshot::Sender<()>>>,
 }
 
 fn now_ms() -> u64 {
@@ -254,13 +256,18 @@ impl Inner {
         }
     }
 
-    fn confirm(&self, key: PublicKey, session: [u8; 16], tx: UnboundedSender<Input>, mux: Arc<Mux>, class: Class) {
+    /// Makes the setup of `session` a link, and replaces the old one. False if that setup has since ended.
+    fn confirm(&self, key: PublicKey, session: [u8; 16], tx: UnboundedSender<Input>, mux: Arc<Mux>, class: Class) -> bool {
         let mut st = self.state.lock().unwrap();
         let used = st.tick();
-        let entry = st.links.entry(key.x25519()).or_default();
-        if entry.setup.as_ref().is_some_and(|s| s.session == session) {
-            entry.setup = None;
-        }
+        let Some(entry) = st
+            .links
+            .get_mut(&key.x25519())
+            .filter(|e| e.setup.as_ref().is_some_and(|s| s.session == session))
+        else {
+            return false;
+        };
+        entry.setup = None;
         let old = entry.up.replace(Up { session, tx, mux: mux.clone(), class, used, connected: true });
         for waiter in entry.waiters.drain(..) {
             let _ = waiter.send(mux.clone());
@@ -268,6 +275,15 @@ impl Inner {
         if let Some(old) = old {
             let _ = old.tx.unbounded_send(Input::End);
         }
+        true
+    }
+
+    async fn new_peer(&self, class: Class) -> io::Result<Arc<dyn Peer>> {
+        let ice = self.signal.ice_servers();
+        if class == Class::Relayed && ice.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "no relay server to relay through"));
+        }
+        peer(&ice, class == Class::Relayed).await
     }
 
     async fn dial(
@@ -278,9 +294,7 @@ impl Inner {
         tx: UnboundedSender<Input>,
         rx: UnboundedReceiver<Input>,
     ) -> io::Result<()> {
-        let peer = peer(&self.signal.ice_servers(), class == Class::Relayed)
-            .await
-            .inspect_err(|_| self.unlink(to, session))?;
+        let peer = self.new_peer(class).await.inspect_err(|_| self.unlink(to, session))?;
         let mut link = Link::new(self.clone(), to, session, class, true, peer, tx);
         let msg1 = match link.make_offer().await {
             Ok(msg1) => msg1,
@@ -328,6 +342,9 @@ impl Inner {
     async fn answer(self: &Arc<Self>, envelope: Vec<u8>, session: [u8; 16]) -> io::Result<()> {
         let (offer, class, tx, rx) = {
             let mut st = self.state.lock().unwrap();
+            if st.closed {
+                return Err(io::Error::new(io::ErrorKind::NotConnected, "endpoint closed"));
+            }
             let offer = Offer::receive(&self.key, &st.replay, &envelope, now_ms())?;
             let class = Class::of((self.admit)(&offer.dialer))?;
             if st.sessions.contains_key(&session) {
@@ -342,9 +359,7 @@ impl Inner {
             (offer, class, tx, rx)
         };
         let dialer = offer.dialer;
-        let peer = peer(&self.signal.ice_servers(), class == Class::Relayed)
-            .await
-            .inspect_err(|_| self.unlink(dialer, session))?;
+        let peer = self.new_peer(class).await.inspect_err(|_| self.unlink(dialer, session))?;
         let mut link = Link::new(self.clone(), dialer, session, class, false, peer, tx);
         let reply = match link.accept_offer(offer).await {
             Ok(reply) => reply,
@@ -378,9 +393,14 @@ impl Inner {
     }
 }
 
-async fn route_all(inner: Arc<Inner>) {
+/// Routes what the carrier delivers until the endpoint closes or is dropped. It holds the endpoint only weakly.
+async fn route_all(signal: Arc<dyn Signal>, inner: Weak<Inner>, mut stopped: oneshot::Receiver<()>) {
     loop {
-        let Some(envelope) = inner.signal.recv().await else {
+        let envelope = match select(signal.recv(), &mut stopped).await {
+            Either::Left((Some(envelope), _)) => envelope,
+            _ => return,
+        };
+        let Some(inner) = inner.upgrade() else {
             return;
         };
         let Some((kind, session)) = route(&envelope) else {
@@ -532,7 +552,7 @@ impl Link {
             Input::Candidates(envelope) => {
                 if self.mux.is_some() {
                     self.apply_candidates(&envelope).await?;
-                } else {
+                } else if self.held.len() < MAX_HELD {
                     self.held.push(envelope);
                 }
                 Ok(true)
@@ -554,12 +574,12 @@ impl Link {
 
     async fn apply_candidates(&self, envelope: &[u8]) -> io::Result<()> {
         let mux = self.mux.as_ref().expect("candidates are applied once keyed");
-        let Ok((_, bytes)) = mux.transport().open_candidates(envelope) else {
+        let Ok(bytes) = mux.transport().open_candidates(envelope) else {
             return Ok(());
         };
         let batch: Vec<String> = ciborium::from_reader(bytes.as_slice()).map_err(io::Error::other)?;
         for candidate in batch {
-            self.peer.candidate(candidate).await?;
+            let _ = self.peer.candidate(candidate).await;
         }
         Ok(())
     }
@@ -583,8 +603,10 @@ impl Link {
                 let mux = self.mux.clone().ok_or_else(|| io::Error::other("stream event before the handshake"))?;
                 match mux.handle(event)? {
                     Some(Incoming::Hello) if !self.confirmed => {
+                        if !self.inner.confirm(self.key, self.session, self.tx.clone(), mux, self.class) {
+                            return Ok(false);
+                        }
                         self.confirmed = true;
-                        self.inner.confirm(self.key, self.session, self.tx.clone(), mux, self.class);
                     }
                     Some(Incoming::Stream(stream)) => {
                         if (self.inner.admit)(&self.key) == Admit::Refuse {
@@ -611,6 +633,7 @@ impl Endpoint {
         admit: impl Fn(&PublicKey) -> Admit + Send + Sync + 'static,
     ) -> Endpoint {
         let (accepts, accepted) = unbounded();
+        let (stop, stopped) = oneshot::channel();
         let inner = Arc::new(Inner {
             key,
             signal: Arc::new(signal),
@@ -618,8 +641,9 @@ impl Endpoint {
             accepts,
             accepted: AsyncMutex::new(accepted),
             state: Mutex::new(State::default()),
+            stop: Mutex::new(Some(stop)),
         });
-        spawn(route_all(inner.clone()));
+        spawn(route_all(inner.signal.clone(), Arc::downgrade(&inner), stopped));
         Endpoint(inner)
     }
 
@@ -659,5 +683,6 @@ impl Endpoint {
             st.links.clear();
         }
         self.0.accepts.close_channel();
+        self.0.stop.lock().unwrap().take();
     }
 }

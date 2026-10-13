@@ -104,8 +104,8 @@ impl PeerConnectionEventHandler for Handler {
             let _ = dc.close().await;
             return;
         };
-        let _ = self.0.events.unbounded_send(Event::Opened(n));
         self.0.register(n, dc);
+        let _ = self.0.events.unbounded_send(Event::Opened(n));
     }
 }
 
