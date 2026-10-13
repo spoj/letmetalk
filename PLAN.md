@@ -230,7 +230,9 @@ impl WsSignal {  // feature "ws"
 - **Setup.**
   - The dialer creates a peer connection with the carrier's ICE servers, plus the relay-only policy if `admit` says
     `Relayed`.
-  - It creates the control channel (`letmetalk/1`, negotiated with id 0, so no in-band open is needed) and an offer.
+  - It creates the control channel (in band, labelled `0`, before the offer, so the offer has an SCTP section) and an
+    offer. The accepter sees the channel as an open. A negotiated channel would lose its first message: webrtc-rs drops
+    data that reaches a channel its peer has not opened yet.
   - The offer goes in message 1 at once, with no candidates.
   - Once the dialer has read message 2, its candidates follow in batches every 50 ms until gathering ends.
   - On native, letmetalk lists interfaces itself (`netdev`) and binds only up, physical ones, skipping docker, veth and
@@ -242,7 +244,10 @@ impl WsSignal {  // feature "ws"
     - applies `admit`, and a refusal gets no reply;
     - does the same with an answer in message 2, then its own candidates.
   - Candidates that arrive early are held until they can be applied.
-- **Confirmation.** Once the control channel opens, each side sends `Hello` on it, encrypted with the session keys. The
+- **Connect.** `connect` uses a confirmed link if one is live. Otherwise it waits for the setup already under way to
+  that key, or starts one. A setup that ends without a link fails the waiting `connect` with `TimedOut`.
+- **Confirmation.** When its control channel opens (the dialer's own open, the accepter's when the dialer's arrives),
+  each side sends `Hello` on it, encrypted with the session keys. The
   link is up when the peer's `Hello` opens. It has two jobs:
   - Nothing waits on an unconfirmed link: neither streams, nor the replacement of an older link.
   - From the dialer, `Hello` is the first message that proves the dialer even to a peer whose own key was stolen.
@@ -282,6 +287,8 @@ impl WsSignal {  // feature "ws"
 ### Streams
 
 - **Channels.** Each stream is one data channel, reliable and ordered, opened in band (DCEP).
+  - Native closes wait until SCTP has acknowledged what was sent. webrtc-rs's close can overtake data still in flight,
+    so the peer then loses the final `Finish`.
   - Streams open only once the link is confirmed. That also avoids a webrtc-rs bug: a channel the answering side opens
     just after ICE connects, before SCTP is up, never opens.
   - A browser opener writes at once. A native opener waits for the peer's DCEP ack.

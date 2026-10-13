@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -12,7 +13,8 @@ use futures::future::BoxFuture;
 use futures::lock::Mutex as AsyncMutex;
 use futures::StreamExt;
 use n0_future::task::spawn;
-use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
+use n0_future::time::sleep;
+use webrtc::data_channel::{DataChannel, DataChannelEvent};
 use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
     RTCIceCandidateInit, RTCIceServer, RTCIceTransportPolicy, RTCPeerConnectionIceEvent,
@@ -22,7 +24,6 @@ use webrtc::peer_connection::{
 use crate::IceServer;
 use crate::backend::{Event, Peer};
 
-const CONTROL_LABEL: &str = "letmetalk/1";
 const SEND_BUFFER: usize = 1 << 20;
 
 /// Interfaces that are physical and up, with their addresses. Without any, loopback, so that peers on this
@@ -115,9 +116,10 @@ pub(crate) struct Native {
 }
 
 impl Native {
+    /// The control channel is in-band, opened by the dialer before the offer. Negotiated channels would let
+    /// the first message race the peer's channel opening, and webrtc-rs drops it.
     async fn control(&self) -> io::Result<()> {
-        let init = RTCDataChannelInit { negotiated: Some(0), ..Default::default() };
-        let dc = self.pc.create_data_channel(CONTROL_LABEL, Some(init)).await.map_err(io::Error::other)?;
+        let dc = self.pc.create_data_channel("0", None).await.map_err(io::Error::other)?;
         self.shared.register(0, dc);
         Ok(())
     }
@@ -127,7 +129,7 @@ fn other(e: webrtc::error::Error) -> io::Error {
     io::Error::other(e)
 }
 
-pub(crate) fn peer(ice: &[IceServer], relay_only: bool) -> BoxFuture<'static, io::Result<Box<dyn Peer>>> {
+pub(crate) fn peer(ice: &[IceServer], relay_only: bool) -> BoxFuture<'static, io::Result<Arc<dyn Peer>>> {
     let servers: Vec<RTCIceServer> = ice
         .iter()
         .map(|s| RTCIceServer { urls: s.urls.clone(), username: s.username.clone(), credential: s.credential.clone() })
@@ -145,7 +147,7 @@ pub(crate) fn peer(ice: &[IceServer], relay_only: bool) -> BoxFuture<'static, io
             .build()
             .await
             .map_err(other)?;
-        Ok(Box::new(Native { pc: Arc::new(pc), shared, events: AsyncMutex::new(rx) }) as Box<dyn Peer>)
+        Ok(Arc::new(Native { pc: Arc::new(pc), shared, events: AsyncMutex::new(rx) }) as Arc<dyn Peer>)
     })
 }
 
@@ -164,7 +166,6 @@ impl Peer for Native {
         Box::pin(async move {
             let desc = RTCSessionDescription::offer(offer).map_err(other)?;
             self.pc.set_remote_description(desc).await.map_err(other)?;
-            self.control().await?;
             let answer = self.pc.create_answer(None).await.map_err(other)?;
             self.pc.set_local_description(answer.clone()).await.map_err(other)?;
             Ok(answer.sdp)
@@ -206,9 +207,13 @@ impl Peer for Native {
         })
     }
 
+    /// Closes once SCTP has acknowledged what was sent: webrtc-rs's close can overtake data still in flight.
     fn close_channel(&self, channel: u32) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             if let Ok(dc) = self.shared.channel(channel) {
+                while dc.outstanding_bytes().await.is_ok_and(|n| n > 0) {
+                    sleep(Duration::from_millis(1)).await;
+                }
                 let _ = dc.close().await;
             }
         })

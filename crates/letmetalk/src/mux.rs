@@ -176,6 +176,14 @@ impl Mux {
         })
     }
 
+    pub(crate) fn transport(&self) -> &Transport {
+        &self.transport
+    }
+
+    pub(crate) fn streams(&self) -> usize {
+        self.state.lock().unwrap().streams.len()
+    }
+
     fn peer_parity(&self) -> u32 {
         u32::from(self.dialer)
     }
@@ -214,7 +222,7 @@ impl Mux {
     /// Handles one event of the peer connection that concerns streams or the control channel.
     pub(crate) fn handle(self: &Arc<Self>, event: Event) -> io::Result<Option<Incoming>> {
         match event {
-            Event::Ready(CONTROL) => {
+            Event::Ready(CONTROL) | Event::Opened(CONTROL) => {
                 self.send_control(Plain::Hello)?;
                 Ok(None)
             }
@@ -549,7 +557,6 @@ mod tests {
     /// A dialer mux (A) and an accepter mux (B) over a fake pair. Both sides are served.
     struct Pair {
         a: Arc<Mux>,
-        b: Arc<Mux>,
         a_peer: Arc<dyn Peer>,
         accepts: UnboundedReceiver<Stream>,
         b_task: n0_future::task::JoinHandle<io::Result<()>>,
@@ -562,7 +569,7 @@ mod tests {
         let b = Mux::new(pb.clone(), tb, SecretKey::generate().public(), false, BUDGET);
         let _ = serve(a.clone(), pa.clone());
         let (accepts, b_task) = serve(b.clone(), pb);
-        Pair { a, b, a_peer: pa, accepts, b_task }
+        Pair { a, a_peer: pa, accepts, b_task }
     }
 
     /// Sends a message on stream `n` from A as the dialer would, sealed at `index`.
@@ -574,7 +581,7 @@ mod tests {
     #[test]
     fn numbers_need_the_peers_parity_and_must_be_new() {
         let mut numbers = Numbers::default();
-        assert!(numbers.admit(0, 0).is_err());
+        assert!(numbers.admit(CONTROL, 0).is_err());
         assert!(numbers.admit(3, 0).is_err());
         assert!(numbers.admit(LAST, 1).is_err());
         numbers.admit(2, 0).unwrap();
@@ -677,13 +684,6 @@ mod tests {
     async fn opening_a_number_of_our_parity_fails_the_link() {
         let p = pair();
         p.a_peer.open(3).await.unwrap();
-        assert!(p.b_task.await.unwrap().is_err());
-    }
-
-    #[tokio::test]
-    async fn opening_zero_fails_the_link() {
-        let p = pair();
-        p.a_peer.open(CONTROL).await.unwrap();
         assert!(p.b_task.await.unwrap().is_err());
     }
 

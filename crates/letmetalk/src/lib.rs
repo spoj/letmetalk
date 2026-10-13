@@ -1,18 +1,16 @@
-#[allow(dead_code)]
 mod backend;
-#[allow(dead_code)]
+#[cfg(test)]
 mod fake;
-#[allow(dead_code)]
+mod endpoint;
 mod handshake;
-#[allow(dead_code)]
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
-#[allow(dead_code)]
 mod mux;
-#[allow(dead_code)]
 mod stream;
 mod keys;
 mod signal;
 
+pub use endpoint::{Admit, Endpoint};
 pub use keys::{PublicKey, SecretKey};
 pub use signal::{IceServer, Signal};
+pub use stream::Stream;

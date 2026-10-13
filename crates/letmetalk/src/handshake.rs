@@ -23,8 +23,8 @@ const MAX_AGE_MS: u64 = 10 * 60 * 1000;
 const CACHE_CAP: usize = 100_000;
 const CANDIDATE_NONCE: u64 = ((1 << 24) - 1) << 40;
 
-#[derive(Clone, Copy)]
-enum Kind {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Kind {
     Offer = 1,
     Answer = 2,
     Candidates = 3,
@@ -36,6 +36,20 @@ struct OfferPayload {
     sent_ms: u64,
     ek: ByteArray<KEM_EK>,
     sdp: String,
+}
+
+/// The kind and session of an envelope, before it is opened.
+pub(crate) fn route(envelope: &[u8]) -> Option<(Kind, [u8; 16])> {
+    let kind = match envelope.get(1)? {
+        1 => Kind::Offer,
+        2 => Kind::Answer,
+        3 => Kind::Candidates,
+        _ => return None,
+    };
+    if envelope[0] != VERSION {
+        return None;
+    }
+    Some((kind, envelope.get(2..HEADER)?.try_into().ok()?))
 }
 
 fn frame(kind: Kind, session: &[u8; 16], body: &[u8]) -> Vec<u8> {
@@ -168,6 +182,7 @@ pub(crate) struct Offer {
     session: [u8; 16],
     ek: EncapsulationKey<MlKem768>,
     pub(crate) dialer: PublicKey,
+    pub(crate) sent_ms: u64,
     pub(crate) sdp: String,
 }
 
@@ -208,6 +223,7 @@ impl Offer {
             session,
             ek,
             dialer,
+            sent_ms: payload.sent_ms,
             sdp: payload.sdp,
         })
     }
