@@ -9,13 +9,17 @@ use futures::future::BoxFuture;
 use rustls::ClientConfig;
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{Message, http::Uri};
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
-use super::wire::{self, Down, MAX_ENVELOPE, Up};
+use super::wire::{self, Down, MAX_DOWN, MAX_ENVELOPE, Up};
 use crate::{IceServer, PublicKey, SecretKey, Signal};
 
+const TIMEOUT: Duration = Duration::from_secs(10);
+const SILENT: Duration = Duration::from_secs(15);
 const RETRY: Duration = Duration::from_secs(2);
+const INBOX: usize = 256;
 
 type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -39,14 +43,14 @@ enum Ended {
 /// A forwarder client. It logs in in the background, and again after a drop.
 pub struct WsSignal {
     shared: Arc<Shared>,
-    inbox: AsyncMutex<mpsc::UnboundedReceiver<Vec<u8>>>,
+    inbox: AsyncMutex<mpsc::Receiver<Vec<u8>>>,
     task: JoinHandle<()>,
 }
 
 impl WsSignal {
     /// `wss://` only, except to loopback. Any other URL stops the carrier at once.
     pub fn new(url: &str, key: &SecretKey) -> WsSignal {
-        let (inbox_tx, inbox) = mpsc::unbounded_channel();
+        let (inbox_tx, inbox) = mpsc::channel(INBOX);
         let shared = Arc::new(Shared::default());
         let task = tokio::spawn(run(url.to_owned(), key.clone(), shared.clone(), inbox_tx));
         WsSignal {
@@ -87,12 +91,7 @@ impl Signal for WsSignal {
     }
 }
 
-async fn run(
-    url: String,
-    key: SecretKey,
-    shared: Arc<Shared>,
-    inbox: mpsc::UnboundedSender<Vec<u8>>,
-) {
+async fn run(url: String, key: SecretKey, shared: Arc<Shared>, inbox: mpsc::Sender<Vec<u8>>) {
     let Ok(uri) = url.parse::<Uri>() else { return };
     let Some(host) = uri.host() else { return };
     let loopback = matches!(host, "localhost" | "127.0.0.1" | "[::1]");
@@ -110,22 +109,36 @@ async fn run(
             .unwrap_or(Ended::Dropped)
         {
             Ended::Replaced => return,
-            Ended::Dropped => tokio::time::sleep(RETRY).await,
+            Ended::Dropped => {
+                let mut bytes = [0; 2];
+                getrandom::fill(&mut bytes).expect("OS randomness");
+                let jitter = Duration::from_millis(u64::from(u16::from_be_bytes(bytes)) % 2000);
+                tokio::time::sleep(RETRY + jitter).await;
+            }
         }
     }
 }
 
-async fn session(
-    url: &str,
-    host: &str,
-    key: &SecretKey,
-    shared: &Shared,
-    inbox: &mpsc::UnboundedSender<Vec<u8>>,
-) -> io::Result<Ended> {
-    let (mut ws, _) =
-        tokio_tungstenite::connect_async_tls_with_config(url, None, false, Some(connector()))
-            .await
-            .map_err(io::Error::other)?;
+async fn login(url: &str, host: &str, key: &SecretKey) -> io::Result<(Ws, Vec<IceServer>)> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let tls =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the default protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_DOWN))
+        .max_frame_size(Some(MAX_DOWN));
+    let (mut ws, _) = tokio_tungstenite::connect_async_tls_with_config(
+        url,
+        Some(config),
+        true,
+        Some(Connector::Rustls(Arc::new(tls))),
+    )
+    .await
+    .map_err(io::Error::other)?;
     let Some(Ok(Message::Binary(challenge))) = ws.next().await else {
         return Err(io::ErrorKind::InvalidData.into());
     };
@@ -136,33 +149,54 @@ async fn session(
     let Down::Ice(ice) = next_down(&mut ws).await? else {
         return Err(io::ErrorKind::InvalidData.into());
     };
+    Ok((ws, ice))
+}
+
+async fn session(
+    url: &str,
+    host: &str,
+    key: &SecretKey,
+    shared: &Shared,
+    inbox: &mpsc::Sender<Vec<u8>>,
+) -> io::Result<Ended> {
+    let (mut ws, ice) = tokio::time::timeout(TIMEOUT, login(url, host, key))
+        .await
+        .map_err(io::Error::other)??;
     *shared.ice.lock().unwrap() = ice;
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     *shared.out.lock().unwrap() = Some(out_tx);
     let mut pending = HashMap::new();
     let mut next_id = 0u32;
+    let silent = tokio::time::sleep(SILENT);
+    tokio::pin!(silent);
     let ended = loop {
         tokio::select! {
-            down = next_down(&mut ws) => match down {
-                Ok(Down::Deliver(envelope)) => {
-                    let _ = inbox.send(envelope);
+            down = next_down(&mut ws) => {
+                silent.as_mut().reset(tokio::time::Instant::now() + SILENT);
+                match down {
+                    Ok(Down::Deliver(envelope)) => {
+                        let _ = inbox.try_send(envelope);
+                    }
+                    Ok(Down::Passed(id)) => ack(&mut pending, id, Ok(())),
+                    Ok(Down::Offline(id)) => ack(&mut pending, id, Err(io::ErrorKind::HostUnreachable.into())),
+                    Ok(Down::Limited(id)) => ack(&mut pending, id, Err(io::ErrorKind::ResourceBusy.into())),
+                    Ok(Down::Ice(ice)) => *shared.ice.lock().unwrap() = ice,
+                    Ok(Down::Replaced) => break Ended::Replaced,
+                    Err(_) => break Ended::Dropped,
                 }
-                Ok(Down::Passed(id)) => ack(&mut pending, id, Ok(())),
-                Ok(Down::Offline(id)) => ack(&mut pending, id, Err(io::ErrorKind::HostUnreachable.into())),
-                Ok(Down::Limited(id)) => ack(&mut pending, id, Err(io::ErrorKind::ResourceBusy.into())),
-                Ok(Down::Ice(ice)) => *shared.ice.lock().unwrap() = ice,
-                Ok(Down::Replaced) => break Ended::Replaced,
-                Err(_) => break Ended::Dropped,
             },
             Some(req) = out_rx.recv() => {
+                pending.retain(|_, reply| !reply.is_closed());
                 next_id = next_id.wrapping_add(1);
                 pending.insert(next_id, req.ack);
                 let up = Up { id: next_id, to: req.to, envelope: req.envelope };
-                if ws.send(Message::Binary(up.encode().into())).await.is_err() {
+                let sent = tokio::time::timeout(SILENT, ws.send(Message::Binary(up.encode().into()))).await;
+                if !matches!(sent, Ok(Ok(()))) {
                     break Ended::Dropped;
                 }
             }
+            _ = &mut silent => break Ended::Dropped,
         }
     };
     *shared.out.lock().unwrap() = None;
@@ -177,18 +211,6 @@ fn ack(
     if let Some(ack) = pending.remove(&id) {
         let _ = ack.send(result);
     }
-}
-
-fn connector() -> Connector {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .expect("ring supports the default protocol versions")
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-    Connector::Rustls(Arc::new(config))
 }
 
 async fn next_down(ws: &mut Ws) -> io::Result<Down> {

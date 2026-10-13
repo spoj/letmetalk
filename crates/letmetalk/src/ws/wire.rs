@@ -12,6 +12,8 @@ use crate::keys::{PublicKey, SecretKey};
 pub const MAX_ENVELOPE: usize = 8 * 1024;
 /// A client-to-server frame: id, recipient and envelope.
 pub const MAX_UP: usize = 4 + 32 + MAX_ENVELOPE;
+/// A server-to-client frame: an envelope, or the ICE servers.
+pub const MAX_DOWN: usize = 16 * 1024;
 const LABEL: &[u8] = b"letmetalk-signal/1";
 
 pub enum Down {
@@ -122,8 +124,8 @@ fn shared(secret: &StaticSecret, public: &[u8; 32]) -> io::Result<[u8; 32]> {
     Ok(dh.to_bytes())
 }
 
-/// The MAC state over the host, keyed by a labelled hash of the shared secret.
-fn mac(dh: &[u8; 32], host: &str) -> Blake2sMac256 {
+/// The MAC state over the claimed Ed25519 key and the lowercased host, keyed by a labelled hash of the shared secret.
+fn mac(dh: &[u8; 32], claimed: &[u8; 32], host: &str) -> Blake2sMac256 {
     let key: [u8; 32] = Blake2s256::new()
         .chain_update(b"letmetalk-signal/1 key")
         .chain_update(dh)
@@ -131,8 +133,14 @@ fn mac(dh: &[u8; 32], host: &str) -> Blake2sMac256 {
         .into();
     let mut mac = Blake2sMac256::new_from_slice(&key).expect("32-byte key");
     mac.update(LABEL);
-    mac.update(host.as_bytes());
+    mac.update(claimed);
+    mac.update(host.to_ascii_lowercase().as_bytes());
     mac
+}
+
+/// What the forwarder keys sessions and routes by. A and its negation share it.
+pub fn session_key(key: &PublicKey) -> [u8; 32] {
+    key.x25519()
 }
 
 /// The client's login: its Ed25519 key, then the MAC. It answers a challenge for `host`.
@@ -144,7 +152,11 @@ pub fn answer(key: &SecretKey, host: &str, challenge: &[u8]) -> io::Result<[u8; 
     let dh = shared(&secret, &challenge)?;
     let mut out = [0; 64];
     out[..32].copy_from_slice(&key.public().to_bytes());
-    out[32..].copy_from_slice(&mac(&dh, host).finalize().into_bytes());
+    out[32..].copy_from_slice(
+        &mac(&dh, &key.public().to_bytes(), host)
+            .finalize()
+            .into_bytes(),
+    );
     Ok(out)
 }
 
@@ -155,7 +167,7 @@ pub fn verify(challenge: &Challenge, host: &str, login: &[u8]) -> io::Result<Pub
     }
     let key = PublicKey::from_bytes(login[..32].try_into().expect("32 bytes"))?;
     let dh = shared(&challenge.secret, &key.x25519())?;
-    mac(&dh, host)
+    mac(&dh, &key.to_bytes(), host)
         .verify_slice(&login[32..])
         .map_err(io::Error::other)?;
     Ok(key)
@@ -193,6 +205,25 @@ mod tests {
         let challenge = Challenge::fresh();
         let mut login = login(&key, HOST, &challenge);
         login[63] ^= 1;
+        assert!(verify(&challenge, HOST, &login).is_err());
+    }
+
+    #[test]
+    fn login_is_case_insensitive_in_the_host() {
+        let key = SecretKey::from_bytes([3; 32]);
+        let challenge = Challenge::fresh();
+        let login = login(&key, "Signal.Example", &challenge);
+        assert!(verify(&challenge, HOST, &login).is_ok());
+    }
+
+    #[test]
+    fn refuses_the_negation_of_the_signed_key() {
+        let key = SecretKey::from_bytes([3; 32]);
+        let challenge = Challenge::fresh();
+        let mut login = login(&key, HOST, &challenge);
+        let mut negated = key.public().to_bytes();
+        negated[31] ^= 0x80;
+        login[..32].copy_from_slice(&negated);
         assert!(verify(&challenge, HOST, &login).is_err());
     }
 
