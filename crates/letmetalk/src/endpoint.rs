@@ -686,3 +686,88 @@ impl Endpoint {
         self.0.stop.lock().unwrap().take();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fake;
+    use crate::backend::Peer;
+    use crate::handshake::{Dialer, Offer, Replay};
+
+    /// A live, idle link of `class`: a mux over a real handshake and a fake peer. The fake's other end is returned
+    /// too, since the fake fails once it is dropped.
+    async fn live_link(class: Class, used: u64) -> (Up, Arc<dyn Peer>) {
+        let (a, b) = (SecretKey::generate(), SecretKey::generate());
+        let (dialer, msg1) = Dialer::dial(&a, &b.public(), [1; 16], now_ms(), String::new()).unwrap();
+        let offer = Offer::receive(&b, &Replay::default(), &msg1, now_ms()).unwrap();
+        let (msg2, _) = offer.answer(&mut Replay::default(), now_ms(), "").unwrap();
+        let (transport, _) = dialer.finish(&msg2).map_err(|(_, e)| e).unwrap();
+        let (peer, other) = fake::pair();
+        let mux = Mux::new(peer, transport, b.public(), true, class.budget());
+        let (tx, _) = unbounded();
+        (Up { session: [used as u8; 16], tx, mux, class, used, connected: true }, other)
+    }
+
+    fn setup(class: Class, dialed: bool, since: u64) -> Setup {
+        let (tx, _) = unbounded();
+        Setup { session: [since as u8; 16], tx, dialed, sent_ms: now_ms(), class, since }
+    }
+
+    #[tokio::test]
+    async fn full_links_evict_the_least_recent_idle_one_then_refuse() {
+        let mut st = State::default();
+        let mut keys = Vec::new();
+        let mut others = Vec::new();
+        for used in 1..=LINKS as u64 {
+            let key = SecretKey::generate().public();
+            let (up, other) = live_link(Class::Direct, used).await;
+            st.links.entry(key.x25519()).or_default().up = Some(up);
+            others.push(other);
+            keys.push(key);
+        }
+        st.make_room(Class::Direct).unwrap();
+        assert!(st.links[&keys[0].x25519()].up.is_none());
+        assert!(st.links[&keys[1].x25519()].up.is_some());
+
+        let key = SecretKey::generate().public();
+        let (up, other) = live_link(Class::Direct, LINKS as u64 + 1).await;
+        st.links.entry(key.x25519()).or_default().up = Some(up);
+        others.push(other);
+        let mut busy = Vec::new();
+        for entry in st.links.values() {
+            if let Some(up) = &entry.up {
+                busy.push(up.mux.open("busy").await.unwrap());
+            }
+        }
+        assert_eq!(st.make_room(Class::Direct).unwrap_err().kind(), io::ErrorKind::ResourceBusy);
+        assert_eq!(st.make_room(Class::Relayed).unwrap_err().kind(), io::ErrorKind::ResourceBusy);
+    }
+
+    #[tokio::test]
+    async fn relayed_offers_from_fresh_keys_evict_no_direct_setup_or_link() {
+        let me = SecretKey::generate().public();
+        let mut st = State::default();
+        let direct_setup = SecretKey::generate().public();
+        st.links.entry(direct_setup.x25519()).or_default().setup = Some(setup(Class::Direct, false, 1));
+        let direct_link = SecretKey::generate().public();
+        let (up, _direct_other) = live_link(Class::Direct, 1).await;
+        st.links.entry(direct_link.x25519()).or_default().up = Some(up);
+        let mut others = Vec::new();
+        for used in 0..LINKS as u64 - 3 {
+            let key = SecretKey::generate().public();
+            let (up, other) = live_link(Class::Relayed, used).await;
+            st.links.entry(key.x25519()).or_default().up = Some(up);
+            others.push(other);
+        }
+
+        for _ in 0..50 {
+            let key = SecretKey::generate().public();
+            if st.admit_inbound(me, key, now_ms(), Class::Relayed).is_ok() {
+                let since = st.tick();
+                st.links.entry(key.x25519()).or_default().setup = Some(setup(Class::Relayed, false, since));
+            }
+        }
+        assert!(st.links[&direct_setup.x25519()].setup.is_some());
+        assert!(st.links[&direct_link.x25519()].up.is_some());
+    }
+}

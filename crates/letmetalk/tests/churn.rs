@@ -1,12 +1,10 @@
 mod common;
 
-use std::io;
 use std::time::{Duration, Instant};
 
-use common::{Carrier, Hub};
+use common::{Carrier, Hub, round_trip, serve};
 use futures::future::join_all;
-use letmetalk::{Admit, Endpoint, PublicKey, SecretKey};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use letmetalk::{Admit, Endpoint, SecretKey};
 
 fn tasks() -> usize {
     tokio::runtime::Handle::current().metrics().num_alive_tasks()
@@ -26,27 +24,6 @@ async fn settle(tasks_before: usize, fds_before: usize) -> (usize, usize) {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-}
-
-async fn serve(b: Endpoint) {
-    while let Some(mut stream) = b.accept().await {
-        tokio::spawn(async move {
-            let mut data = Vec::new();
-            stream.read_to_end(&mut data).await.unwrap();
-            stream.write_all(&data).await.unwrap();
-            stream.shutdown().await.unwrap();
-        });
-    }
-}
-
-async fn round_trip(a: &Endpoint, to: PublicKey) -> io::Result<()> {
-    let mut stream = a.connect(to, "echo").await?;
-    stream.write_all(b"ping").await?;
-    stream.shutdown().await?;
-    let mut echoed = Vec::new();
-    stream.read_to_end(&mut echoed).await?;
-    assert_eq!(echoed, b"ping");
-    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
