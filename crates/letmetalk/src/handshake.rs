@@ -107,7 +107,24 @@ impl Dialer {
         Ok((Self { state, decaps }, frame(Kind::Offer, &session, &msg)))
     }
 
-    pub(crate) fn finish(mut self, envelope: &[u8]) -> io::Result<(Transport, String)> {
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn finish(
+        mut self,
+        envelope: &[u8],
+    ) -> Result<(Transport, String), (Self, io::Error)> {
+        match self.read(envelope) {
+            Ok(sdp) => {
+                let transport = self
+                    .state
+                    .into_stateless_transport_mode()
+                    .expect("message 2 completes the handshake");
+                Ok((Transport(transport), sdp))
+            }
+            Err(e) => Err((self, e)),
+        }
+    }
+
+    fn read(&mut self, envelope: &[u8]) -> io::Result<String> {
         let (_, body) = unframe(envelope, Kind::Answer)?;
         if body.len() < KEM_CT {
             return Err(io::Error::other("short answer"));
@@ -116,21 +133,16 @@ impl Dialer {
         let secret = self
             .decaps
             .decapsulate_slice(ct)
-            .map_err(io::Error::other)?;
+            .expect("ciphertext has the fixed ML-KEM length");
         self.state
             .set_psk(2, &pq_psk(&secret, ct))
-            .map_err(io::Error::other)?;
+            .expect("psk slot 2 exists in IKpsk2");
         let mut payload = vec![0; MAX_MSG];
         let n = self
             .state
             .read_message(msg, &mut payload)
             .map_err(io::Error::other)?;
-        let sdp = String::from_utf8(payload[..n].to_vec()).map_err(io::Error::other)?;
-        let transport = self
-            .state
-            .into_stateless_transport_mode()
-            .map_err(io::Error::other)?;
-        Ok((Transport(transport), sdp))
+        String::from_utf8(payload[..n].to_vec()).map_err(io::Error::other)
     }
 }
 
@@ -308,7 +320,7 @@ mod tests {
         assert_eq!(offer.dialer, alice.public());
         assert_eq!(offer.sdp, "offer");
         let (msg2, bob_t) = offer.answer("answer").unwrap();
-        let (alice_t, sdp) = dialer.finish(&msg2).unwrap();
+        let (alice_t, sdp) = dialer.finish(&msg2).map_err(|(_, e)| e).unwrap();
         assert_eq!(sdp, "answer");
 
         let sealed = alice_t.seal(7, b"hello").unwrap();
@@ -316,6 +328,21 @@ mod tests {
         assert!(bob_t.open(8, &sealed).is_err());
         let back = bob_t.seal(8, b"hi").unwrap();
         assert_eq!(alice_t.open(8, &back).unwrap(), b"hi");
+    }
+
+    #[test]
+    fn garbled_answer_then_real_answer_succeeds() {
+        let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
+        let (dialer, msg1) = dial(&alice, &bob, NOW);
+        let (msg2, _) = Offer::receive(&bob, &mut Replay::default(), &msg1, NOW)
+            .unwrap()
+            .answer("answer")
+            .unwrap();
+        let Err((dialer, _)) = dialer.finish(&flipped(&msg2, msg2.len() - 1)) else {
+            panic!("garbled answer accepted");
+        };
+        let (_, sdp) = dialer.finish(&msg2).map_err(|(_, e)| e).unwrap();
+        assert_eq!(sdp, "answer");
     }
 
     #[test]
@@ -433,7 +460,7 @@ mod tests {
             .unwrap()
             .answer("answer")
             .unwrap();
-        let (alice_t, _) = dialer.finish(&msg2).unwrap();
+        let (alice_t, _) = dialer.finish(&msg2).map_err(|(_, e)| e).unwrap();
 
         let session = [3; 16];
         let first = alice_t.seal_candidates(&session, 0, b"zero").unwrap();
@@ -463,7 +490,7 @@ mod tests {
             .unwrap()
             .answer("answer")
             .unwrap();
-        let (alice_t, _) = dialer.finish(&msg2).unwrap();
+        let (alice_t, _) = dialer.finish(&msg2).map_err(|(_, e)| e).unwrap();
 
         let session = [3; 16];
         for index in [INDEX_LIMIT, 1 << 40] {
