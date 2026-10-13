@@ -1,1 +1,3 @@
-//! Dial a public key over WebRTC, natively and in browsers.
+mod keys;
+
+pub use keys::{PublicKey, SecretKey};
