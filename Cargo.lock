@@ -1559,6 +1559,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "snow",
+ "socket2",
  "tokio",
  "tokio-tungstenite",
  "webpki-roots 1.0.9",

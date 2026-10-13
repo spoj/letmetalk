@@ -354,6 +354,12 @@ impl WsSignal {  // feature "ws"
   - It gathers host, server-reflexive and TURN relay candidates itself, and resolves browsers' mDNS (`.local`)
     candidates.
   - It supports the relay-only policy, ICE-TCP and ICE restart.
+  - **Socket buffers.** webrtc-rs binds its UDP sockets with the OS defaults, which drop packets under bulk load. So
+    every socket gets 4 MiB send and receive buffers, through a `Runtime` wrapper (`with_runtime`). Linux caps the
+    request at `net.core.rmem_max`, which is 208 KiB on stock kernels, so a host that keeps the default gets smaller
+    buffers. Spike 2 measured the drops and the 1 s stalls that this removes.
+  - **SCTP MTU stays at webrtc-rs's default.** MTU 1400 gained 13% on loopback in spike 2. It is unvalidated on real
+    paths and risks black holes on tunnels (WireGuard 1420, tailscale 1280) and TURN, so it is rejected for the trial.
   - **TURN over UDP only.** It skips `turns:` and TCP TURN URLs. TURN over TCP is planned for after its 1.0
     (webrtc#848; PR #907 is open), and nothing tracks TLS. So a native endpoint on a network that blocks UDP has no
     relay.
@@ -362,8 +368,10 @@ impl WsSignal {  // feature "ws"
   - Its DTLS is 1.2 only, and DTLS 1.3 waits until after its 1.0 (webrtc#801). That doesn't touch the guarantees.
   - 0.21 (September 2026) is its pre-1.0 line, the run-up to 1.0. It is weeks old, so step 0 tests it before anything
     is built on it.
-- **Why not str0m:** it leaves NIC enumeration, STUN and TURN outside its scope, so we would write candidate gathering
-  and a TURN client. Its README also says peer-to-peer "has received less testing" than its SFU use.
+- **Why not str0m:** at equal settings it was 2.2–2.8× slower in spike 2 (106 vs 233 MB/s with MTU 1400; 74 vs 206
+  MB/s with 4 MiB buffers), with worse latency under load (9–14 ms p50 against 3–4 ms). Its single event queue gives no
+  per-channel isolation, so it would need the same credit layer. Its per-SACK cost is sctp-proto's, not a setting. It
+  also leaves NIC enumeration, STUN and TURN outside its scope, so we would write candidate gathering and a TURN client.
   - It remains the fallback, so letmetalk reaches the native stack through a narrow seam that str0m could also sit
     behind: create a link, set the remote description, add candidates, open, send, receive and close channels, and
     events.
