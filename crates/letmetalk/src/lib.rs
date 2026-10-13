@@ -4,6 +4,10 @@ mod backend;
 mod fake;
 #[allow(dead_code)]
 mod handshake;
+#[allow(dead_code)]
+mod mux;
+#[allow(dead_code)]
+mod stream;
 mod keys;
 mod signal;
 

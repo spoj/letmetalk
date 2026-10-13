@@ -153,7 +153,8 @@ impl WsSignal {  // feature "ws"
   - `TimedOut`: no link formed within 15 s. A refusal looks the same, since refusals are silent.
   - `ResourceBusy`: no new link fits, because every link at the cap holds streams.
   - `ConnectionReset`: the stream, or its link, died, was reset, or failed to decrypt.
-- **Streams.** Dropping a stream without finishing it resets it. To refuse an unknown protocol, the accepter drops the
+- **Streams.** Dropping a stream before `shutdown` resets it; after `shutdown`, it discards what the peer still sends until
+  the peer finishes, so the peer can finish. To refuse an unknown protocol, the accepter drops the
   stream.
 - **Same types on both targets.**
   - On wasm, JS objects are held in `SendWrapper`, which is safe because wasm32-unknown-unknown has one thread.
@@ -282,10 +283,11 @@ impl WsSignal {  // feature "ws"
   - Streams open only once the link is confirmed. That also avoids a webrtc-rs bug: a channel the answering side opens
     just after ICE connects, before SCTP is up, never opens.
   - A browser opener writes at once. A native opener waits for the peer's DCEP ack.
-  - At most 128 streams are open per link in each direction, and at most 16 wait for `accept`. Further opens are reset.
+  - At most 128 streams are open per link in each direction, and at most 16 wait for `accept`. Further peer opens are
+    reset; a local open beyond 128 fails with `ResourceBusy`.
 - **Numbers.** Streams are numbered by letmetalk, not by channel id, since webrtc-rs's `id()` is only a local handle.
   - The link's dialer opens even numbers and its accepter odd ones. Numbers are never reused on a link, and an open
-    past 2²³ streams from one side fails.
+    past the 24-bit range fails with `ResourceBusy` (about 2²³ streams from one side).
   - Stream 0 is the control channel. Number 2²⁴−1 is reserved for `Candidates` envelopes.
   - The DCEP label carries the number. The protocol name travels encrypted in the stream's first message, which also
     sidesteps web-sys having no getter for a channel's protocol.
@@ -314,8 +316,9 @@ impl WsSignal {  // feature "ws"
   would stall every stream, the control channel included. And browsers deliver messages as events, with no back-pressure
   at all. So each stream gets its own window, under a budget for its link:
   - **Credit.**
-    - The reader grants a stream 16 KiB of credit until the app accepts it, enough for `Open` and a first message.
-    - From then on it grants up to 1 MiB, and more as the app reads.
+    - Every stream starts with 16 KiB of credit on both sides, with no message. Only `Data` bytes count; `Open` is
+      not counted, and its protocol name is at most 255 bytes.
+    - The reader grants more: up to 16 KiB until the app accepts a stream, then up to 1 MiB, and more as the app reads.
     - It never has more than the link's budget granted at once: 4 MiB for a Direct link, 256 KiB for a Relayed one.
   - **Enforcement.** The sender never sends past its credit. A message past it fails the link, so what a peer can make
     an endpoint hold is bounded by its link's budget.
