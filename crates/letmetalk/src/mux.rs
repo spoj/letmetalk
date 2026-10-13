@@ -81,7 +81,7 @@ struct Numbers {
 
 impl Numbers {
     fn admit(&mut self, number: u32, parity: u32) -> io::Result<()> {
-        if number == CONTROL || number == LAST || number % 2 != parity {
+        if number == CONTROL || number >= LAST || number % 2 != parity {
             return Err(io::Error::other("bad stream number"));
         }
         if number + WINDOW <= self.highest || !self.seen.insert(number) {
@@ -103,6 +103,7 @@ struct State {
     numbers: Numbers,
     next: u32,
     control_index: u64,
+    control_open: bool,
     dead: bool,
 }
 
@@ -171,6 +172,7 @@ impl Mux {
                 numbers: Numbers::default(),
                 next: if dialer { 2 } else { 1 },
                 control_index: 0,
+                control_open: false,
                 dead: false,
             }),
         })
@@ -222,7 +224,14 @@ impl Mux {
     /// Handles one event of the peer connection that concerns streams or the control channel.
     pub(crate) fn handle(self: &Arc<Self>, event: Event) -> io::Result<Option<Incoming>> {
         match event {
-            Event::Ready(CONTROL) | Event::Opened(CONTROL) => {
+            Event::Ready(CONTROL) => {
+                self.send_control(Plain::Hello)?;
+                Ok(None)
+            }
+            Event::Opened(CONTROL) => {
+                if std::mem::replace(&mut self.state.lock().unwrap().control_open, true) {
+                    return Err(io::Error::other("control channel opened twice"));
+                }
                 self.send_control(Plain::Hello)?;
                 Ok(None)
             }
@@ -558,7 +567,9 @@ mod tests {
     struct Pair {
         a: Arc<Mux>,
         a_peer: Arc<dyn Peer>,
+        b_peer: Arc<dyn Peer>,
         accepts: UnboundedReceiver<Stream>,
+        a_task: n0_future::task::JoinHandle<io::Result<()>>,
         b_task: n0_future::task::JoinHandle<io::Result<()>>,
     }
 
@@ -567,9 +578,9 @@ mod tests {
         let (pa, pb) = fake::pair();
         let a = Mux::new(pa.clone(), ta, SecretKey::generate().public(), true, BUDGET);
         let b = Mux::new(pb.clone(), tb, SecretKey::generate().public(), false, BUDGET);
-        let _ = serve(a.clone(), pa.clone());
-        let (accepts, b_task) = serve(b.clone(), pb);
-        Pair { a, a_peer: pa, accepts, b_task }
+        let (_, a_task) = serve(a.clone(), pa.clone());
+        let (accepts, b_task) = serve(b.clone(), pb.clone());
+        Pair { a, a_peer: pa, b_peer: pb, accepts, a_task, b_task }
     }
 
     /// Sends a message on stream `n` from A as the dialer would, sealed at `index`.
@@ -584,6 +595,8 @@ mod tests {
         assert!(numbers.admit(CONTROL, 0).is_err());
         assert!(numbers.admit(3, 0).is_err());
         assert!(numbers.admit(LAST, 1).is_err());
+        assert!(numbers.admit(LAST + 1, 0).is_err());
+        assert!(numbers.admit(u32::MAX - 1, 0).is_err());
         numbers.admit(2, 0).unwrap();
         assert!(numbers.admit(2, 0).is_err());
         numbers.admit(2 + 2 * WINDOW, 0).unwrap();
@@ -684,6 +697,26 @@ mod tests {
     async fn opening_a_number_of_our_parity_fails_the_link() {
         let p = pair();
         p.a_peer.open(3).await.unwrap();
+        assert!(p.b_task.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn opening_a_number_past_the_range_fails_the_link() {
+        for number in [(1 << 24) + 2, u32::MAX - 1] {
+            let p = pair();
+            p.a_peer.open(number).await.unwrap();
+            assert!(p.b_task.await.unwrap().is_err());
+        }
+        let p = pair();
+        p.b_peer.open(LAST).await.unwrap();
+        assert!(p.a_task.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn opening_the_control_channel_twice_fails_the_link() {
+        let p = pair();
+        p.a_peer.open(CONTROL).await.unwrap();
+        p.a_peer.open(CONTROL).await.unwrap();
         assert!(p.b_task.await.unwrap().is_err());
     }
 
