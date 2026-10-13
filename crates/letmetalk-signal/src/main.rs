@@ -26,12 +26,12 @@ struct Args {
     /// TURN URLs for members, from the coturn instance with the full quota.
     #[arg(long, required = true)]
     member_turn: Vec<String>,
-    #[arg(long)]
+    #[arg(long, env = "MEMBER_SECRET")]
     member_secret: String,
     /// TURN URLs for everyone else, from the coturn instance with the small quota.
     #[arg(long, required = true)]
     stranger_turn: Vec<String>,
-    #[arg(long)]
+    #[arg(long, env = "STRANGER_SECRET")]
     stranger_secret: String,
     /// Hex keys, one per line. Listed keys get member TURN; without a file every key is a routing member
     /// and gets stranger TURN.
