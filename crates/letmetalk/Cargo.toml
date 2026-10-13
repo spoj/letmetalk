@@ -14,9 +14,9 @@ blake2 = "0.10"
 ciborium = "0.2.2"
 ed25519-dalek = "3"
 futures = "0.3"
-http = { version = "1", optional = true }
 getrandom = "0.4"
 hex = "0.4"
+http = { version = "1", optional = true }
 ml-kem = { version = "0.3", features = ["getrandom", "zeroize"] }
 n0-future = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -34,13 +34,40 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = ["c
 webpki-roots = { version = "1", optional = true }
 webrtc = "0.21.1"
 
-[dev-dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "time"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+tokio = { version = "1", features = ["io-util"] }
+wasm-bindgen-test = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
 getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 js-sys = "0.3"
-send_wrapper = "0.6"
+send_wrapper = { version = "0.6", features = ["futures"] }
 wasm-bindgen = "0.2.129"
-web-sys = { version = "0.3.106", features = ["BinaryType", "MessageEvent", "WebSocket"] }
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3.106", features = [
+    "BinaryType",
+    "MessageEvent",
+    "RtcConfiguration",
+    "RtcDataChannel",
+    "RtcDataChannelEvent",
+    "RtcDataChannelType",
+    "RtcIceCandidate",
+    "RtcIceCandidateInit",
+    "RtcIceServer",
+    "RtcIceTransportPolicy",
+    "RtcPeerConnection",
+    "RtcPeerConnectionIceEvent",
+    "RtcPeerConnectionState",
+    "RtcSdpType",
+    "RtcSessionDescription",
+    "RtcSessionDescriptionInit",
+    "WebSocket",
+] }
+
+[[test]]
+name = "browser"
+required-features = ["ws"]

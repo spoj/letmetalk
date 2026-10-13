@@ -6,19 +6,17 @@ use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use js_sys::{ArrayBuffer, Uint8Array};
 use send_wrapper::SendWrapper;
-use wasm_bindgen::prelude::{Closure, JsValue};
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::{Closure, JsValue};
 use web_sys::{BinaryType, MessageEvent, WebSocket};
+
+use crate::web::js;
 
 pub(super) struct Socket {
     ws: SendWrapper<WebSocket>,
     frames: UnboundedReceiver<io::Result<Vec<u8>>>,
     _message: SendWrapper<Closure<dyn FnMut(MessageEvent)>>,
     _closed: SendWrapper<Closure<dyn FnMut(JsValue)>>,
-}
-
-fn js(e: JsValue) -> io::Error {
-    io::Error::other(format!("{e:?}"))
 }
 
 impl Socket {
