@@ -22,7 +22,11 @@ pub fn no_turn() -> Turn {
     }
 }
 
-pub async fn spawn(allowlist: Option<HashSet<PublicKey>>, member_turn: Turn, stranger_turn: Turn) -> (String, Forwarder) {
+pub async fn spawn(
+    allowlist: Option<HashSet<PublicKey>>,
+    member_turn: Turn,
+    stranger_turn: Turn,
+) -> (String, Forwarder) {
     let forwarder = Forwarder::new(Config {
         host: HOST.into(),
         allowlist,
@@ -31,7 +35,9 @@ pub async fn spawn(allowlist: Option<HashSet<PublicKey>>, member_turn: Turn, str
     });
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
-    let app = forwarder.router().into_make_service_with_connect_info::<SocketAddr>();
+    let app = forwarder
+        .router()
+        .into_make_service_with_connect_info::<SocketAddr>();
     tokio::spawn(async move { axum::serve(listener, app).await });
     (format!("ws://{addr}/ws"), forwarder)
 }

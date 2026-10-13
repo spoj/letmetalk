@@ -6,8 +6,8 @@ use blake2::digest::Mac;
 use blake2::{Blake2s256, Blake2sMac256, Digest};
 use x25519_dalek::{PublicKey as Montgomery, StaticSecret};
 
-use crate::keys::{PublicKey, SecretKey};
 use crate::IceServer;
+use crate::keys::{PublicKey, SecretKey};
 
 pub const MAX_ENVELOPE: usize = 8 * 1024;
 /// A client-to-server frame: id, recipient and envelope.
@@ -74,7 +74,12 @@ pub struct Up {
 
 impl Up {
     pub fn encode(&self) -> Vec<u8> {
-        [&self.id.to_be_bytes()[..], &self.to.to_bytes(), &self.envelope].concat()
+        [
+            &self.id.to_be_bytes()[..],
+            &self.to.to_bytes(),
+            &self.envelope,
+        ]
+        .concat()
     }
 
     pub fn decode(frame: &[u8]) -> io::Result<Self> {
@@ -214,7 +219,10 @@ mod tests {
             Down::Limited(3),
             Down::Replaced,
         ] {
-            assert_eq!(Down::decode(&down.encode()).unwrap().encode(), down.encode());
+            assert_eq!(
+                Down::decode(&down.encode()).unwrap().encode(),
+                down.encode()
+            );
         }
         assert!(Down::decode(&[9]).is_err());
         assert!(Down::decode(&[1, 0]).is_err());

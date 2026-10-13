@@ -87,7 +87,12 @@ impl Signal for WsSignal {
     }
 }
 
-async fn run(url: String, key: SecretKey, shared: Arc<Shared>, inbox: mpsc::UnboundedSender<Vec<u8>>) {
+async fn run(
+    url: String,
+    key: SecretKey,
+    shared: Arc<Shared>,
+    inbox: mpsc::UnboundedSender<Vec<u8>>,
+) {
     let Ok(uri) = url.parse::<Uri>() else { return };
     let Some(host) = uri.host() else { return };
     let loopback = matches!(host, "localhost" | "127.0.0.1" | "[::1]");
@@ -100,7 +105,10 @@ async fn run(url: String, key: SecretKey, shared: Arc<Shared>, inbox: mpsc::Unbo
         return;
     }
     loop {
-        match session(&url, host, &key, &shared, &inbox).await.unwrap_or(Ended::Dropped) {
+        match session(&url, host, &key, &shared, &inbox)
+            .await
+            .unwrap_or(Ended::Dropped)
+        {
             Ended::Replaced => return,
             Ended::Dropped => tokio::time::sleep(RETRY).await,
         }
@@ -161,7 +169,11 @@ async fn session(
     Ok(ended)
 }
 
-fn ack(pending: &mut HashMap<u32, oneshot::Sender<io::Result<()>>>, id: u32, result: io::Result<()>) {
+fn ack(
+    pending: &mut HashMap<u32, oneshot::Sender<io::Result<()>>>,
+    id: u32,
+    result: io::Result<()>,
+) {
     if let Some(ack) = pending.remove(&id) {
         let _ = ack.send(result);
     }
@@ -170,11 +182,12 @@ fn ack(pending: &mut HashMap<u32, oneshot::Sender<io::Result<()>>>, id: u32, res
 fn connector() -> Connector {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .expect("ring supports the default protocol versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the default protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     Connector::Rustls(Arc::new(config))
 }
 

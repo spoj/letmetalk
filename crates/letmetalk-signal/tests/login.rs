@@ -16,7 +16,9 @@ async fn login(url: &str, host: &str, seed: u8, tamper: bool) -> Option<Message>
     if tamper {
         login[63] ^= 1;
     }
-    ws.send(Message::Binary(login.to_vec().into())).await.unwrap();
+    ws.send(Message::Binary(login.to_vec().into()))
+        .await
+        .unwrap();
     ws.next().await.and_then(Result::ok)
 }
 

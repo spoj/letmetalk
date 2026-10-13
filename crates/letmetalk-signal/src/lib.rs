@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use axum::Router;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{ConnectInfo, State, WebSocketUpgrade};
 use axum::response::Response;
 use axum::routing::get;
-use axum::Router;
 use letmetalk::ws::wire::{self, Down, Up};
 use letmetalk::{IceServer, PublicKey};
 use limit::{Bucket, Rate, take_keyed};
@@ -227,7 +227,12 @@ fn route(
     } else {
         Down::Passed(id)
     };
-    let target = shared.sessions.lock().unwrap().get(&up.to).map(|s| s.out.clone());
+    let target = shared
+        .sessions
+        .lock()
+        .unwrap()
+        .get(&up.to)
+        .map(|s| s.out.clone());
     let Some(target) = target else {
         return offline;
     };

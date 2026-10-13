@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use common::*;
-use letmetalk::ws::WsSignal;
 use letmetalk::Signal;
+use letmetalk::ws::WsSignal;
 
 fn signal(url: &str, seed: u8) -> WsSignal {
     WsSignal::new(url, &key(seed))
@@ -88,6 +88,8 @@ async fn a_new_login_replaces_the_old_one() {
     let closed = tokio::time::timeout(Duration::from_secs(5), old.recv()).await;
     assert_eq!(closed.unwrap(), None);
     logged_in(&b).await;
-    b.send(key(1).public(), b"to the new one".to_vec()).await.unwrap();
+    b.send(key(1).public(), b"to the new one".to_vec())
+        .await
+        .unwrap();
     assert_eq!(new.recv().await.unwrap(), b"to the new one");
 }

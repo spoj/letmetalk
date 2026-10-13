@@ -22,4 +22,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync",
 
 [dev-dependencies]
 futures = "0.3"
+tokio = { version = "1", features = ["process"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
+turn = "0.17"
+webrtc-util = { version = "0.17", features = ["conn"] }

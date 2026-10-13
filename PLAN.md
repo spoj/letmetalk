@@ -396,7 +396,8 @@ it later.
 - **coturn hardening.** `crates/letmetalk-signal/coturn/member.conf` and `stranger.conf` are the trial's coturn configs,
   without secrets. Both deny peers in loopback, private, link-local, shared-address, multicast and cloud-metadata ranges,
   and set `no-multicast-peers`. `stranger.conf` adds the quotas. Without these, a peer's candidates could aim the TURN
-  server at internal addresses (the known TURN SSRF class).
+  server at internal addresses (the known TURN SSRF class). In coturn 4.18 a denied `::`, even alone, refuses every
+  IPv4 peer, so the configs leave the unspecified IPv6 address out. `max-bps` counts bytes per second.
 - **One login per key.** A new login replaces the old one. The replaced socket is sent `5` and closed, and `WsSignal`
   does not reconnect it, so two processes with one key don't evict each other in a loop.
 - **Frames.** Integers are big-endian.
