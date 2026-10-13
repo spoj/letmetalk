@@ -373,7 +373,12 @@ it later.
     anyone else, since the server could have computed the MAC itself.
   - The host is in the MAC, so a login cannot be relayed to another server. All-zero Diffie–Hellman results are
     refused.
-  - `WsSignal` connects over `wss://` only, except to loopback.
+  - Wire, in `letmetalk::ws::wire`: the challenge is 32 raw bytes, the first message from the server. The client
+    answers with `Ed25519 (32) ‖ MAC (32)`. The MAC is BLAKE2s-MAC, keyed with `BLAKE2s("letmetalk-signal/1 key" ‖
+    DH)`, over `letmetalk-signal/1 ‖ host`. The host is the URL's host name without port. The socket is `/ws`. A bad
+    login gets no reply: the server closes the socket.
+  - `WsSignal` connects over `wss://` only, except to loopback. Any other URL stops it at once: `recv` returns None
+    and `send` fails with `NotConnected`. Otherwise it reconnects after 2 s.
 - **TURN credentials.**
   - The login's reply carries the ICE servers, with TURN credentials in the TURN REST form, valid for 24 h.
   - The username is `expiry:token`, with a random 128-bit token per login. The forwarder keeps token→key in memory to
@@ -386,15 +391,19 @@ it later.
   the TURN server at internal addresses (the known TURN SSRF class).
 - **One login per key.** A new login replaces the old one. The replaced socket is told so, and `WsSignal` does not
   reconnect it, so two processes with one key don't evict each other in a loop.
-- **Frames.**
+- **Frames.** Integers are big-endian.
   - Client to server: `id (u32) ‖ to (32) ‖ envelope`.
   - Server to client:
     - `0 ‖ envelope`: a delivery;
     - `1 ‖ id`: passed to the recipient's socket;
     - `2 ‖ id`: the recipient isn't connected;
     - `3 ‖ id`: over a limit;
-    - `4 ‖ ICE servers`: renewed credentials.
-  - `WsSignal::send` resolves on `1`, `2` or `3`; `2` becomes `HostUnreachable`.
+    - `4 ‖ ICE servers`: the login reply, and renewed credentials (CBOR);
+    - `5`: this key logged in elsewhere. The socket closes after it.
+  - `WsSignal::send` resolves on `1`, `2` or `3`. `2` becomes `HostUnreachable`, `3` becomes `ResourceBusy`, and a
+    socket lost before its ack becomes `NotConnected`.
+  - `send` refuses an envelope over 8 KiB with `InvalidInput`. The server closes a socket that sends a frame over
+    8 KiB + 36 bytes.
 - **Limits.**
   - Envelopes of up to 8 KiB. An offer or answer is about 3 KB, ML-KEM included.
   - Rates per login, per socket and per IP, sized in step 3 from a measured startup of an endpoint dialing 20 peers.
@@ -402,6 +411,9 @@ it later.
   - Nothing is stored.
 - **Presence.** `2 ‖ id` tells any logged-in key whether another key is online. Run with an allowlist to keep that
   among known keys. Embedded in letmeknow's service, it would forward only between members of a group.
+  - Members are the keys on the allowlist. Without one, every key is a member: an open forwarder.
+  - A non-member gets `1` for every recipient, online or not, so it never learns presence. Its envelopes to offline
+    members are dropped.
 
 ## Trial
 

@@ -1,6 +1,7 @@
 use std::io;
 
 use futures::future::BoxFuture;
+use serde::{Deserialize, Serialize};
 
 use crate::PublicKey;
 
@@ -13,7 +14,7 @@ pub trait Signal: Send + Sync + 'static {
     fn ice_servers(&self) -> Vec<IceServer>;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IceServer {
     pub urls: Vec<String>,
     pub username: String,
