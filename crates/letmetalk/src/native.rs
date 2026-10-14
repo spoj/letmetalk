@@ -1,4 +1,4 @@
-//! The native backend: webrtc-rs 0.21, with its UDP sockets bound to physical interfaces.
+//! The native backend: webrtc-rs 0.21, with its UDP sockets bound to every interface's addresses.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -85,12 +85,12 @@ impl Runtime for Buffers {
     }
 }
 
-/// Interfaces that are physical and up, with their addresses. Without any, loopback, so that peers on this
+/// Interfaces that are up, other than loopback, with their addresses. Without any, loopback, so that peers on this
 /// machine still connect.
 fn bind_addrs() -> Vec<String> {
     let mut addrs: Vec<IpAddr> = netdev::get_interfaces()
         .into_iter()
-        .filter(|i| i.is_up() && i.is_physical())
+        .filter(|i| i.is_up() && !i.is_loopback())
         .flat_map(|i| i.ip_addrs())
         .filter(|ip| !matches!(ip, IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80))
         .collect();
