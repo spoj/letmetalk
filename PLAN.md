@@ -35,7 +35,8 @@ What letmetalk promises, whatever app uses it and whichever WebRTC stack carries
    fingerprint, and `Hello` confirms the link, so nobody can splice two links into one.
 2. **Private and tamper-proof, end to end.**
    - Only the two endpoints can read a stream.
-   - Any change, replay, reordering or injection fails the link.
+   - DTLS discards a record that fails its MAC or repeats one (RFC 6347 §4.1.2.7), and SCTP retransmits what the
+     network loses. A stream delivers exactly what the peer wrote, in order, or fails.
    - This holds against the carrier, TURN servers and the network. DTLS encrypts and authenticates every byte, and the
      handshake pins it to the two keys, so letmetalk adds no cipher of its own to the data.
 3. **Forward secret,** from DTLS's ephemeral key exchange. Recorded traffic stays closed even if a long-term key is
@@ -71,11 +72,15 @@ Not promised:
     steals the dialer's key too.
 - **Post-quantum.** Natively, links rest on webrtc-rs's DTLS 1.2, whose key exchange is classical. Browsers may
   negotiate ML-KEM in DTLS 1.3 between themselves, but letmetalk can't check or require it. The handshake is X25519
-  only, so recorded envelopes could later expose their SDPs, and with them the DTLS fingerprints.
+  only, so recorded envelopes could later expose their SDPs, and with them the DTLS fingerprints. Recorded
+  `Candidates` expose each side's candidates, host addresses included, which undoes guarantee 5 for Direct links. That
+  matters more than the fingerprints.
 - **Post-quantum authentication.** Authentication only has to hold while a link forms, so it matters only once quantum
   attacks run live.
 - **The DTLS implementation.** A flaw in a stack's DTLS can expose links, since letmetalk adds no cipher of its own.
-  Natively that is webrtc-rs's own DTLS 1.2.
+  Natively that is webrtc-rs's own DTLS 1.2. The fingerprint check is the stack's too: in webrtc-rs it is the
+  `SettingEngine` option `disable_certificate_fingerprint_verification`, off by default, and letmetalk sets no
+  `SettingEngine`; in browsers it comes from RFC 8122 and RFC 8827.
 - **Healing.** If a live link's keys leak, that link stays exposed until it ends. Every new link starts afresh.
 - **The endpoints themselves.** A compromised device or key is out of scope.
 
@@ -267,7 +272,8 @@ impl WsSignal {  // feature "ws"
   that key, or starts one. A setup that ends without a link fails the waiting `connect` with `TimedOut`.
 - **Confirmation.**
   - Once all five of its channels are open, each side sends `Hello` on the control channel, sealed with its session key
-    at nonce 0. The dialer's channels open as the accepter acknowledges them; the accepter's as the dialer's arrive.
+    at nonce 0. The accepter's channels open as the dialer's arrive. The dialer's open when the
+    accepter acknowledges them (webrtc-rs), or when they are sent (Chrome); `Hello` waits for all five either way.
   - A side's link is up once it has sent its `Hello` and the peer's has opened. A `Hello` that does not open, because it
     was sealed for another session or in the other direction, fails the link.
   - The two conditions give three things:
@@ -335,9 +341,11 @@ impl WsSignal {  // feature "ws"
   - On the control channel: `Hello`, then `Credit(stream, bytes)`. `Hello` is sealed with the session key, and nothing
     else on the control channel is sealed.
   - A stream ends when both sides have sent `Finish`, or either has sent `Reset`. A frame or `Credit` for a stream that
-    has ended is ignored. A number at or below its lane's last `Open` counts as ended.
+    has ended is ignored, so `Data` after both `Finish`es is ignored too. A number at or below its lane's last `Open`
+    counts as ended.
   - These fail the link: a frame for a number never opened that is not an `Open`, including a `Credit` for one; a frame
-    on the wrong lane; `Data` after the peer's `Finish`; a text message on any channel; and anything malformed.
+    on the wrong lane; `Data` after the peer's `Finish` on a stream still open; a text message on any channel; and
+    anything malformed.
 - **Credit before Open.** The control channel and the lanes are separate channels, so their order is not kept. A side
   therefore grants credit on a stream it opened only after the peer's first frame on it, which shows that the `Open`
   arrived. Until then, the stream has its first 16 KiB, which needs no message.
