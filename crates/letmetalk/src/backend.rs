@@ -1,8 +1,11 @@
 use std::io;
-#[cfg(feature = "stats")]
 use std::time::Duration;
 
 use futures::future::BoxFuture;
+
+/// How long a channel stays open after its last byte is acknowledged or buffered, so that the peer drains what
+/// it holds before the close arrives: webrtc-rs drops a channel's queued messages when its close is processed.
+pub(crate) const CLOSE_DRAIN: Duration = Duration::from_millis(200);
 
 /// The selected candidate pair of a link: each side's candidate type (`host`, `srflx`, `prflx` or `relay`), and the
 /// round-trip time of its latest check, zero until one is answered.

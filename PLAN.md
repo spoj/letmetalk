@@ -296,9 +296,10 @@ impl WsSignal {  // feature "ws"
 ### Streams
 
 - **Channels.** Each stream is one data channel, reliable and ordered, opened in band (DCEP).
-  - Native closes wait until SCTP has acknowledged what was sent, for at most 10 s. webrtc-rs's close can overtake data
-    still in flight, so the peer then loses the final `Finish`. A browser's close waits until `bufferedAmount` is 0,
-    since browsers expose no acknowledgements.
+  - Native closes wait until SCTP has acknowledged what was sent, for at most 10 s. A browser's close waits until
+    `bufferedAmount` is 0, since browsers expose no acknowledgements. Either close then waits 200 ms more, so that the
+    peer drains what it holds: webrtc-rs drops a channel's queued messages when its close is processed (found by the
+    bench, which lost a sink's acknowledgement this way).
   - Streams open only once the link is confirmed. That also avoids a webrtc-rs bug: a channel the answering side opens
     just after ICE connects, before SCTP is up, never opens.
   - A browser opener writes at once. A native opener waits for the peer's DCEP ack.
@@ -730,13 +731,12 @@ Not in the trial:
 
 ## Risks
 
-- **webrtc-rs can lose a stream's last messages.** Found by the bench. On loopback, sequential streams on one native
-  link fail with `ConnectionReset` after about 40 to 75 of them (`crates/letmetalk/tests/many_streams.rs`, ignored).
-  A channel's close can be announced before the messages that precede it, and those messages then never arrive. A
-  stream the peer has not finished therefore fails only after 3 s, which covers SCTP's 1 s minimum retransmission
-  timeout, but not every loss. The 3 s also delays a refused link's streams by 3 s, which is the price. Until
-  webrtc-rs is fixed, a native link cannot carry more than about 40 streams, so churn and the stream cap cannot be
-  measured natively. This is the first thing to report upstream.
+- **webrtc-rs can lose a stream's last messages.** Found by the bench. A channel's close, when processed, drops the
+  messages still queued on that channel. Closes now wait 200 ms after the last byte is acknowledged or buffered, and a
+  stream the peer has not finished fails only 3 s after its channel closes, which covers SCTP's 1 s minimum
+  retransmission timeout. Neither is a proof. Sequential streams on one native loopback link still failed once in
+  about 40 to 75 before the drain, and `many_streams.rs` (ignored) reproduces that. The 3 s also delays a refused link's
+  streams. This is the first thing to report upstream.
 - **Our own protocol.**
   - The Noise pattern, the ML-KEM secret in the PSK slot and the nonce layout are ours to get right. The primitives
     come from snow and RustCrypto, not from us.

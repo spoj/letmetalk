@@ -33,7 +33,7 @@ use web_sys::{
 use crate::IceServer;
 #[cfg(feature = "stats")]
 use crate::backend::Path;
-use crate::backend::{Event, Peer};
+use crate::backend::{CLOSE_DRAIN, Event, Peer};
 
 const CONTROL: u32 = 0;
 /// Sends wait while a channel holds this many bytes, and resume once it has drained to half.
@@ -318,6 +318,7 @@ impl Peer for Web {
             while self.inner.buffered(channel) > 0 {
                 sleep(Duration::from_millis(1)).await;
             }
+            sleep(CLOSE_DRAIN).await;
             self.inner.close_lane(channel);
         })
     }

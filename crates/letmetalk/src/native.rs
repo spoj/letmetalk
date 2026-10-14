@@ -27,7 +27,7 @@ use webrtc::peer_connection::{
 use webrtc::peer_connection::{RTCStatsReport, RTCStatsReportEntry, StatsSelector};
 
 use crate::IceServer;
-use crate::backend::{Event, Peer};
+use crate::backend::{CLOSE_DRAIN, Event, Peer};
 #[cfg(feature = "stats")]
 use crate::backend::Path;
 
@@ -280,6 +280,7 @@ impl Peer for Native {
                     }
                     sleep(Duration::from_millis(25)).await;
                 }
+                sleep(CLOSE_DRAIN).await;
                 let _ = dc.close().await;
             }
         })
