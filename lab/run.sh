@@ -11,10 +11,12 @@ rm -rf results
 mkdir results
 compose build >results/build.log 2>&1
 
-# What natdiscovery and the TCP check report behind each NAT label. Filtering is the same for none and eif.
+# What natdiscovery and the TCP check report behind each NAT label, as a pattern. Filtering is the same for none and
+# eif. A public peer may also report no mapping at all, since its mapped address is its own.
 expect() {
     case $1 in
-        none | eif) echo "mapping=Endpoint Independent filtering=Endpoint Independent tcp443=ok" ;;
+        none) echo "mapping=(none|Endpoint Independent) filtering=Endpoint Independent tcp443=ok" ;;
+        eif) echo "mapping=Endpoint Independent filtering=Endpoint Independent tcp443=ok" ;;
         pr) echo "mapping=Endpoint Independent filtering=Address and Port Dependent tcp443=ok" ;;
         sym) echo "mapping=Address and Port Dependent filtering=Address and Port Dependent tcp443=ok" ;;
         blk) echo "mapping=none filtering=none tcp443=ok" ;;
@@ -54,7 +56,7 @@ run_pair() {
             *-h*) nat=$NAT_H ;;
         esac
         compose exec -T "$svc" /lab/nat-check.sh >"$dir/probe-$svc.txt"
-        if [ "$(cat "$dir/probe-$svc.txt")" != "$(expect "$nat")" ]; then
+        if ! grep -Eqx "$(expect "$nat")" "$dir/probe-$svc.txt"; then
             echo "$name: $svc is labelled $nat but probes as: $(cat "$dir/probe-$svc.txt")" >&2
             exit 1
         fi
