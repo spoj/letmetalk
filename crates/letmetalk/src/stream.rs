@@ -18,9 +18,9 @@ pub(crate) struct Io {
 pub(crate) struct IoState {
     pub(crate) accepted: bool,
     pub(crate) inbox: VecDeque<u8>,
-    pub(crate) read: usize,
-    pub(crate) granted: usize,
-    pub(crate) received: usize,
+    pub(crate) read: u64,
+    pub(crate) granted: u64,
+    pub(crate) received: u64,
     pub(crate) credit: usize,
     pub(crate) outbox: VecDeque<Vec<u8>>,
     pub(crate) local_finished: bool,
@@ -32,8 +32,9 @@ pub(crate) struct IoState {
 }
 
 impl IoState {
+    /// Credit granted and not yet read. It stays within `ACCEPTED_CREDIT`, so it fits a `usize`.
     pub(crate) fn outstanding(&self) -> usize {
-        self.granted - self.read
+        (self.granted - self.read) as usize
     }
 }
 
@@ -46,7 +47,7 @@ impl Io {
                 accepted: own,
                 inbox: VecDeque::new(),
                 read: 0,
-                granted: FIRST_CREDIT,
+                granted: FIRST_CREDIT as u64,
                 received: 0,
                 credit: FIRST_CREDIT,
                 outbox: VecDeque::new(),
@@ -123,7 +124,7 @@ impl AsyncRead for Stream {
             n
         };
         s.inbox.drain(..n);
-        s.read += n;
+        s.read += n as u64;
         drop(s);
         self.mux.consumed();
         Poll::Ready(Ok(()))

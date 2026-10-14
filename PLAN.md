@@ -353,6 +353,7 @@ impl WsSignal {  // feature "ws"
       share the link's budget: 4 MiB for a Direct link, 256 KiB for a Relayed one.
   - **Enforcement.** The sender never sends past its credit. A message past it fails the link, so what a peer can make
     an endpoint hold is bounded by budget + 16 KiB × open streams. A peer whose credit would pass 1 MiB fails the link.
+    Byte counts are 64-bit, so a stream on a 32-bit target may pass 4 GiB.
   - So no sender watches a send buffer: credit bounds what each stream holds, on both sides.
   - **Draining.** Every stream's unread data stays within its window, so letmetalk always drains the link at once.
   - **Throughput limit.** A window caps a stream at window ÷ RTT. 1 MiB covers about 80 Mbit/s at 100 ms; quinn's

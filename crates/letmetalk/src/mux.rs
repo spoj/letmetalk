@@ -271,7 +271,7 @@ impl Mux {
         if let Some(io) = self.lookup(&st, n)? {
             let mut s = io.state();
             let bytes = u32::from_be_bytes(bytes) as usize;
-            if s.credit + bytes > ACCEPTED_CREDIT {
+            if bytes > ACCEPTED_CREDIT - s.credit {
                 return Err(io::Error::other("credit past the window"));
             }
             s.credit += bytes;
@@ -366,12 +366,12 @@ impl Mux {
         if s.remote_finished {
             return Err(io::Error::other("data after finish"));
         }
-        if s.received + body.len() > s.granted {
+        if s.received + body.len() as u64 > s.granted {
             return Err(io::Error::other("sent past its credit"));
         }
-        s.received += body.len();
+        s.received += body.len() as u64;
         if s.discard {
-            s.read += body.len();
+            s.read += body.len() as u64;
             drop(s);
             self.grant(st);
             return Ok(());
@@ -405,7 +405,7 @@ impl Mux {
             free -= extra;
             let grant = floor + extra;
             if grant > 0 {
-                s.granted += grant;
+                s.granted += grant as u64;
                 let _ = self.control.unbounded_send(frame(CREDIT, n, &(grant as u32).to_be_bytes()));
             }
         }
@@ -766,6 +766,14 @@ mod tests {
         let p = pair().await;
         let _a = p.a.open("greedy").unwrap();
         send_back(&p, 0, frame(CREDIT, 0, &(ACCEPTED_CREDIT as u32 + 1).to_be_bytes())).await;
+        assert!(p.a_task.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn credit_of_u32_max_fails_the_link_without_overflow() {
+        let p = pair().await;
+        let _a = p.a.open("greedy").unwrap();
+        send_back(&p, 0, frame(CREDIT, 0, &u32::MAX.to_be_bytes())).await;
         assert!(p.a_task.await.unwrap().is_err());
     }
 
