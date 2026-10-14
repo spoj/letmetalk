@@ -1,27 +1,20 @@
 use std::collections::{HashSet, VecDeque};
 use std::io;
 
-use blake2::{Blake2s256, Digest};
-use ml_kem::{
-    Decapsulate, DecapsulationKey, Encapsulate, EncapsulationKey, Kem, KeyExport, MlKem768,
-    TryKeyInit,
-};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteArray;
 use snow::{Builder, HandshakeState, StatelessTransportState};
 
 use crate::keys::{PublicKey, SecretKey};
 
-const PATTERN: &str = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s";
+const PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
 const VERSION: u8 = 1;
 const HEADER: usize = 18;
 const TAG: usize = 16;
-const KEM_CT: usize = 1088;
-const KEM_EK: usize = 1184;
 const MAX_MSG: usize = 65535;
 const MAX_AGE_MS: u64 = 10 * 60 * 1000;
 const CACHE_CAP: usize = 100_000;
-const CANDIDATE_NONCE: u64 = ((1 << 24) - 1) << 40;
+const INDEX_LIMIT: u64 = 1 << 40;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -34,7 +27,6 @@ pub(crate) enum Kind {
 struct OfferPayload {
     key: ByteArray<32>,
     sent_ms: u64,
-    ek: ByteArray<KEM_EK>,
     sdp: String,
 }
 
@@ -70,17 +62,8 @@ fn prologue(session: &[u8; 16]) -> Vec<u8> {
     [b"letmetalk/1".as_slice(), session].concat()
 }
 
-fn pq_psk(secret: &[u8], ct: &[u8]) -> [u8; 32] {
-    let mut hash = Blake2s256::new();
-    hash.update(b"letmetalk/1 pq");
-    hash.update(secret);
-    hash.update(ct);
-    hash.finalize().into()
-}
-
 pub(crate) struct Dialer {
     state: HandshakeState,
-    decaps: DecapsulationKey<MlKem768>,
 }
 
 impl Dialer {
@@ -91,11 +74,9 @@ impl Dialer {
         sent_ms: u64,
         sdp: String,
     ) -> io::Result<(Self, Vec<u8>)> {
-        let (decaps, encaps) = MlKem768::generate_keypair();
         let payload = OfferPayload {
             key: local.public().to_bytes().into(),
             sent_ms,
-            ek: ByteArray::new(encaps.to_bytes().into()),
             sdp,
         };
         let mut cbor = Vec::new();
@@ -115,7 +96,7 @@ impl Dialer {
             .write_message(&cbor, &mut msg)
             .map_err(io::Error::other)?;
         msg.truncate(n);
-        Ok((Self { state, decaps }, frame(Kind::Offer, &session, &msg)))
+        Ok((Self { state }, frame(Kind::Offer, &session, &msg)))
     }
 
     #[allow(clippy::result_large_err)]
@@ -137,21 +118,10 @@ impl Dialer {
 
     fn read(&mut self, envelope: &[u8]) -> io::Result<String> {
         let (_, body) = unframe(envelope, Kind::Answer)?;
-        if body.len() < KEM_CT {
-            return Err(io::Error::other("short answer"));
-        }
-        let (ct, msg) = body.split_at(KEM_CT);
-        let secret = self
-            .decaps
-            .decapsulate_slice(ct)
-            .expect("ciphertext has the fixed ML-KEM length");
-        self.state
-            .set_psk(2, &pq_psk(&secret, ct))
-            .expect("psk slot 2 exists in IKpsk2");
         let mut payload = vec![0; MAX_MSG];
         let n = self
             .state
-            .read_message(msg, &mut payload)
+            .read_message(body, &mut payload)
             .map_err(io::Error::other)?;
         String::from_utf8(payload[..n].to_vec()).map_err(io::Error::other)
     }
@@ -179,7 +149,6 @@ impl Replay {
 pub(crate) struct Offer {
     state: HandshakeState,
     session: [u8; 16],
-    ek: EncapsulationKey<MlKem768>,
     pub(crate) dialer: PublicKey,
     pub(crate) sent_ms: u64,
     pub(crate) sdp: String,
@@ -212,15 +181,12 @@ impl Offer {
         if now_ms.abs_diff(payload.sent_ms) > MAX_AGE_MS {
             return Err(io::Error::other("stale offer"));
         }
-        let ek = EncapsulationKey::<MlKem768>::new_from_slice(&payload.ek.into_array())
-            .map_err(io::Error::other)?;
         if replay.seen.contains(&session) {
             return Err(io::Error::other("replayed offer"));
         }
         Ok(Self {
             state,
             session,
-            ek,
             dialer,
             sent_ms: payload.sent_ms,
             sdp: payload.sdp,
@@ -240,16 +206,11 @@ impl Offer {
         if replay.order.len() >= CACHE_CAP {
             return Err(io::Error::other("replay cache full"));
         }
-        let (ct, secret) = self.ek.encapsulate();
-        self.state
-            .set_psk(2, &pq_psk(&secret, &ct))
-            .expect("psk slot 2 exists in IKpsk2");
         let mut msg = vec![0; MAX_MSG];
         let n = self
             .state
             .write_message(sdp.as_bytes(), &mut msg)
             .map_err(io::Error::other)?;
-        let body = [&ct[..], &msg[..n]].concat();
         let transport = self
             .state
             .into_stateless_transport_mode()
@@ -259,12 +220,14 @@ impl Offer {
             .order
             .push_back((now_ms + 2 * MAX_AGE_MS, self.session));
         Ok((
-            frame(Kind::Answer, &self.session, &body),
+            frame(Kind::Answer, &self.session, &msg[..n]),
             Transport(transport),
         ))
     }
 }
 
+/// The session keys. Each side seals under its own send key, so nonce 0 is never reused under one key: the
+/// control channel's Hello takes nonce 0, and candidates take their index plus one.
 pub(crate) struct Transport(StatelessTransportState);
 
 impl Transport {
@@ -294,8 +257,11 @@ impl Transport {
         index: u64,
         batch: &[u8],
     ) -> io::Result<Vec<u8>> {
+        if index + 1 >= INDEX_LIMIT {
+            return Err(io::Error::other("candidate index exhausted"));
+        }
         let mut body = index.to_be_bytes()[3..].to_vec();
-        body.extend(self.seal(CANDIDATE_NONCE | index, batch)?);
+        body.extend(self.seal(index + 1, batch)?);
         Ok(frame(Kind::Candidates, session, &body))
     }
 
@@ -307,7 +273,7 @@ impl Transport {
         let mut bytes = [0; 8];
         bytes[3..].copy_from_slice(&body[..5]);
         let index = u64::from_be_bytes(bytes);
-        self.open(CANDIDATE_NONCE | index, &body[5..])
+        self.open(index + 1, &body[5..])
     }
 }
 
@@ -409,10 +375,6 @@ mod tests {
         Dialer::dial(from, &to.public(), session, sent_ms, "offer".into()).unwrap()
     }
 
-    fn fresh_ek() -> ByteArray<KEM_EK> {
-        ByteArray::new(MlKem768::generate_keypair().1.to_bytes().into())
-    }
-
     /// Message 1 written by snow itself, so that a test chooses the payload and the DH keys.
     fn message1(
         local: [u8; 32],
@@ -465,11 +427,11 @@ mod tests {
         let (alice_t, sdp) = dialer.finish(&msg2).map_err(|(_, e)| e).unwrap();
         assert_eq!(sdp, "answer");
 
-        let sealed = alice_t.seal(7, b"hello").unwrap();
-        assert_eq!(bob_t.open(7, &sealed).unwrap(), b"hello");
-        assert!(bob_t.open(8, &sealed).is_err());
-        let back = bob_t.seal(8, b"hi").unwrap();
-        assert_eq!(alice_t.open(8, &back).unwrap(), b"hi");
+        let hello = alice_t.seal(0, &[]).unwrap();
+        bob_t.open(0, &hello).unwrap();
+        assert!(bob_t.open(1, &hello).is_err());
+        let back = bob_t.seal(0, &[]).unwrap();
+        alice_t.open(0, &back).unwrap();
     }
 
     #[test]
@@ -488,18 +450,6 @@ mod tests {
     }
 
     #[test]
-    fn answer_under_other_kem_key_fails() {
-        let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
-        let (mut dialer, msg1) = dial(&alice, &bob, NOW);
-        let (msg2, _) = Offer::receive(&bob, &Replay::default(), &msg1, NOW)
-            .unwrap()
-            .answer(&mut Replay::default(), NOW, "answer")
-            .unwrap();
-        dialer.decaps = MlKem768::generate_keypair().0;
-        assert!(dialer.finish(&msg2).is_err());
-    }
-
-    #[test]
     fn tampered_message1_fails() {
         let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
         let (_, msg1) = dial(&alice, &bob, NOW);
@@ -514,15 +464,6 @@ mod tests {
         let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
         let (dialer, _, msg2) = answered(&alice, &bob);
         assert!(dialer.finish(&flipped(&msg2, msg2.len() - 1)).is_err());
-    }
-
-    #[test]
-    fn tampered_ciphertext_fails() {
-        let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
-        for at in [HEADER, HEADER + KEM_CT - 1] {
-            let (dialer, _, msg2) = answered(&alice, &bob);
-            assert!(dialer.finish(&flipped(&msg2, at)).is_err());
-        }
     }
 
     #[test]
@@ -546,7 +487,6 @@ mod tests {
         let payload = OfferPayload {
             key: carol.public().to_bytes().into(),
             sent_ms: NOW,
-            ek: fresh_ek(),
             sdp: "x".into(),
         };
         let msg1 = message1(
@@ -566,7 +506,6 @@ mod tests {
         let payload = OfferPayload {
             key: negated.into(),
             sent_ms: NOW,
-            ek: fresh_ek(),
             sdp: "x".into(),
         };
         let msg1 = message1(
@@ -590,7 +529,6 @@ mod tests {
             let payload = OfferPayload {
                 key: claimed.into(),
                 sent_ms: NOW,
-                ek: fresh_ek(),
                 sdp: "x".into(),
             };
             let resolver = NoSecret(montgomery(claimed));
@@ -652,10 +590,9 @@ mod tests {
             SecretKey::generate(),
         );
         let replay = Replay::default();
-        let payload = |key: [u8; 32], ek| OfferPayload {
+        let payload = |key: [u8; 32]| OfferPayload {
             key: key.into(),
             sent_ms: NOW,
-            ek,
             sdp: "x".into(),
         };
         let honest = |payload: &OfferPayload| {
@@ -669,11 +606,7 @@ mod tests {
         let refused = [
             dial(&alice, &bob, NOW - TEN_MIN - 1).1,
             dial(&alice, &bob, NOW + TEN_MIN + 1).1,
-            honest(&payload(carol.public().to_bytes(), fresh_ek())),
-            honest(&payload(
-                alice.public().to_bytes(),
-                ByteArray::new([0xff; KEM_EK]),
-            )),
+            honest(&payload(carol.public().to_bytes())),
         ];
         for msg1 in &refused {
             assert!(Offer::receive(&bob, &replay, msg1, NOW).is_err());
@@ -747,27 +680,6 @@ mod tests {
     }
 
     #[test]
-    fn candidates_replayed_and_out_of_order() {
-        let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
-        let (dialer, msg1) = dial(&alice, &bob, NOW);
-        let (msg2, bob_t) = Offer::receive(&bob, &Replay::default(), &msg1, NOW)
-            .unwrap()
-            .answer(&mut Replay::default(), NOW, "answer")
-            .unwrap();
-        let (alice_t, _) = dialer.finish(&msg2).map_err(|(_, e)| e).unwrap();
-
-        let session = [3; 16];
-        let first = alice_t.seal_candidates(&session, 0, b"zero").unwrap();
-        let second = alice_t.seal_candidates(&session, 1, b"one").unwrap();
-        assert_eq!(bob_t.open_candidates(&second).unwrap(), b"one");
-        assert_eq!(bob_t.open_candidates(&first).unwrap(), b"zero");
-        assert_eq!(bob_t.open_candidates(&first).unwrap(), b"zero");
-
-        let moved = [&first[..HEADER], &[0, 0, 0, 0, 1], &first[HEADER + 5..]].concat();
-        assert!(bob_t.open_candidates(&moved).is_err());
-    }
-
-    #[test]
     fn candidate_index_limits() {
         let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
         let (dialer, msg1) = dial(&alice, &bob, NOW);
@@ -779,11 +691,9 @@ mod tests {
 
         let session = [3; 16];
         let last = alice_t
-            .seal_candidates(&session, (1 << 40) - 2, b"x")
+            .seal_candidates(&session, INDEX_LIMIT - 2, b"x")
             .unwrap();
         assert_eq!(bob_t.open_candidates(&last).unwrap(), b"x");
-
-        let max_index = [&last[..HEADER], &[0xff; 5], &last[HEADER + 5..]].concat();
-        assert!(bob_t.open_candidates(&max_index).is_err());
+        assert!(alice_t.seal_candidates(&session, INDEX_LIMIT - 1, b"x").is_err());
     }
 }
