@@ -224,17 +224,18 @@ impl Mux {
     /// Handles one event of the peer connection that concerns streams or the control channel.
     pub(crate) fn handle(self: &Arc<Self>, event: Event) -> io::Result<Option<Incoming>> {
         match event {
-            Event::Ready(CONTROL) => {
+            Event::Ready(CONTROL) if self.dialer => {
                 self.send_control(Plain::Hello)?;
                 Ok(None)
             }
-            Event::Opened(CONTROL) => {
+            Event::Opened(CONTROL) if !self.dialer => {
                 if std::mem::replace(&mut self.state.lock().unwrap().control_open, true) {
                     return Err(io::Error::other("control channel opened twice"));
                 }
                 self.send_control(Plain::Hello)?;
                 Ok(None)
             }
+            Event::Opened(CONTROL) => Err(io::Error::other("the dialer's control channel opened")),
             Event::Ready(n) => {
                 self.ready(n);
                 Ok(None)
