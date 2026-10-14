@@ -65,6 +65,10 @@ impl Peer for Fake {
         })
     }
 
+    fn kick(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+
     fn next(&self) -> BoxFuture<'_, Option<Event>> {
         Box::pin(async { self.events.lock().await.next().await })
     }

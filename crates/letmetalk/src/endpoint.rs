@@ -23,7 +23,7 @@ use crate::Signal;
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(15);
 const INBOUND_TIMEOUT: Duration = Duration::from_secs(10);
-const CANDIDATE_BATCH: Duration = Duration::from_millis(50);
+const KICK: Duration = Duration::from_millis(5);
 const LINKS: usize = 256;
 const RELAYED_LINKS: usize = 64;
 const DIRECT_SETUPS: usize = 16;
@@ -428,7 +428,6 @@ async fn flush(inner: Arc<Inner>, mux: Arc<Mux>, key: PublicKey, session: [u8; 1
     let mut index = 0;
     while let Some(first) = rx.next().await {
         let mut batch = vec![first];
-        sleep(CANDIDATE_BATCH).await;
         while let Ok(candidate) = rx.try_recv() {
             batch.push(candidate);
         }
@@ -438,6 +437,18 @@ async fn flush(inner: Arc<Inner>, mux: Arc<Mux>, key: PublicKey, session: [u8; 1
         index += 1;
         if inner.signal.send(key, envelope).await.is_err() {
             return;
+        }
+    }
+}
+
+/// Keeps the peer connection's driver awake until the link is confirmed, so that what it queues while handling a
+/// packet goes out at once.
+async fn kick(peer: Arc<dyn Peer>, stopped: oneshot::Receiver<()>) {
+    let mut stopped = stopped.fuse();
+    loop {
+        futures::select! {
+            _ = stopped => return,
+            _ = sleep(KICK).fuse() => peer.kick().await,
         }
     }
 }
@@ -457,6 +468,7 @@ struct Link {
     held: Vec<Vec<u8>>,
     mux: Option<Arc<Mux>>,
     confirmed: bool,
+    kicker: Option<oneshot::Sender<()>>,
 }
 
 impl Link {
@@ -484,11 +496,15 @@ impl Link {
             held: Vec::new(),
             mux: None,
             confirmed: false,
+            kicker: None,
         }
     }
 
     /// Runs the link's task. Until then nothing reads the peer's events, which wait in its queue.
-    fn start(self, rx: UnboundedReceiver<Input>) {
+    fn start(mut self, rx: UnboundedReceiver<Input>) {
+        let (done, stopped) = oneshot::channel();
+        self.kicker = Some(done);
+        spawn(kick(self.peer.clone(), stopped));
         spawn(self.run(rx));
     }
 
@@ -607,6 +623,7 @@ impl Link {
                             return Ok(false);
                         }
                         self.confirmed = true;
+                        self.kicker = None;
                     }
                     Some(Incoming::Stream(stream)) => {
                         if (self.inner.admit)(&self.key) == Admit::Refuse {

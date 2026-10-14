@@ -283,6 +283,10 @@ impl Peer for Web {
         })
     }
 
+    fn kick(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+
     fn next(&self) -> BoxFuture<'_, Option<Event>> {
         Box::pin(async {
             let event = self.events.lock().await.next().await?;

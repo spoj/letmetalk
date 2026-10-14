@@ -48,6 +48,9 @@ pub(crate) trait Peer: Send + Sync {
     /// The next event; None once the connection is gone.
     fn next(&self) -> BoxFuture<'_, Option<Event>>;
     fn close(&self) -> BoxFuture<'_, ()>;
+    /// Wakes the connection's driver, so that what it has queued goes out. webrtc-rs sends what a packet or event
+    /// queues only at its next wake-up, which can be a 200 ms timer away.
+    fn kick(&self) -> BoxFuture<'_, ()>;
     #[cfg(feature = "stats")]
     fn path(&self) -> BoxFuture<'_, Option<Path>>;
 }

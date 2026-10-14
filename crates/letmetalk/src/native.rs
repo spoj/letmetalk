@@ -278,6 +278,13 @@ impl Peer for Native {
         Box::pin(async { self.events.lock().await.next().await })
     }
 
+    fn kick(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {
+            let config = self.pc.get_configuration().await;
+            let _ = self.pc.set_configuration(config).await;
+        })
+    }
+
     fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {
             let _ = self.pc.close().await;

@@ -243,7 +243,13 @@ impl WsSignal {  // feature "ws"
     offer. The accepter sees the channel as an open. A negotiated channel would lose its first message: webrtc-rs drops
     data that reaches a channel its peer has not opened yet.
   - The offer goes in message 1 at once, with no candidates.
-  - Once the dialer has read message 2, its candidates follow in batches every 50 ms until gathering ends.
+  - Once the dialer has read message 2, its candidates follow as they are gathered, each send taking what has gathered
+    by then, until gathering ends. A batch timer of 50 ms in front of each send cost about 50 ms of setup per side.
+  - Until the link is confirmed, letmetalk wakes the peer connection's driver every 5 ms. webrtc-rs sends what a packet
+    or event queues only when its driver next wakes, and an idle link wakes only on its 200 ms ACK timer. The DTLS
+    start (SCTP's INIT) and the DCEP open then each waited up to 200 ms, and ICE's responses waited too. The wake is
+    `set_configuration` with the configuration already in place, the cheapest driver event webrtc-rs offers. Cold setup
+    on native loopback fell from about 606 ms to about 60 ms.
   - On native, letmetalk lists interfaces itself (`netdev`) and binds only up, physical ones, skipping docker, veth and
     bridges, one socket per address (IPv6 link-local excluded). With no such address, it binds loopback, so peers on
     one machine still connect. webrtc-rs's interface filter is stored but never read.
