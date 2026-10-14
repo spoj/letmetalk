@@ -23,18 +23,18 @@ const MAX_STREAMS: usize = 128;
 const MAX_WAITING: usize = 16;
 const MAX_PROTOCOL: usize = 255;
 
-const OPEN: u8 = 1;
+pub(crate) const OPEN: u8 = 1;
 const DATA: u8 = 2;
 const FINISH: u8 = 3;
 const RESET: u8 = 4;
 const CREDIT: u8 = 5;
 
 /// The lane that carries stream `n`.
-fn lane_of(n: u32) -> u32 {
+pub(crate) fn lane_of(n: u32) -> u32 {
     1 + n % LANES
 }
 
-fn frame(kind: u8, n: u32, body: &[u8]) -> Vec<u8> {
+pub(crate) fn frame(kind: u8, n: u32, body: &[u8]) -> Vec<u8> {
     [&[kind][..], &n.to_be_bytes(), body].concat()
 }
 

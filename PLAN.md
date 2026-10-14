@@ -99,7 +99,8 @@ Not promised:
   - either side disconnects;
   - the endpoint, at its cap, evicts it as the least recently used link with no streams.
 - **Streams are the API.** `connect(key, protocol)` opens a reliable, ordered, two-way byte stream on the link. Each
-  link has four lanes that carry its streams, and a control channel. The peer's `accept()` yields it. On a live link,
+  link has four lanes that carry its streams, and a control channel. The peer's `accept()` yields it once
+  the link is confirmed. On a live link,
   opening a stream costs no round trip on either backend.
 - **Admission.** The app's `admit(key)` decides, per key, whether it gets no link, a relayed one, or a direct one.
   - A relayed link uses only TURN candidates, so the peer never learns this endpoint's addresses.
@@ -266,7 +267,8 @@ impl WsSignal {  // feature "ws"
   - A side's link is up once it has sent its `Hello` and the peer's has opened. A `Hello` that does not open, because it
     was sealed for another session or in the other direction, fails the link.
   - The two conditions give three things:
-    - Nothing waits on an unconfirmed link: neither streams, nor the replacement of an older link.
+    - Nothing reaches the app from an unconfirmed link: the peer's streams are held until its `Hello`, and dropped if
+      the link fails. An older link is replaced only once the new one is confirmed.
     - Each side has all its channels open before the other sends on them, so no frame goes to a channel its peer has
       not opened.
     - From the dialer, `Hello` is the first message that proves the dialer even to a peer whose own key was stolen.

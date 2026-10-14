@@ -466,6 +466,7 @@ struct Link {
     candidates: UnboundedSender<String>,
     candidates_rx: Option<UnboundedReceiver<String>>,
     held: Vec<Vec<u8>>,
+    early: Vec<Stream>,
     mux: Option<Arc<Mux>>,
     confirmed: bool,
     kicker: Option<oneshot::Sender<()>>,
@@ -494,6 +495,7 @@ impl Link {
             candidates,
             candidates_rx: Some(candidates_rx),
             held: Vec::new(),
+            early: Vec::new(),
             mux: None,
             confirmed: false,
             kicker: None,
@@ -624,12 +626,19 @@ impl Link {
                         }
                         self.confirmed = true;
                         self.kicker = None;
+                        for stream in std::mem::take(&mut self.early) {
+                            let _ = self.inner.accepts.unbounded_send(stream);
+                        }
                     }
                     Some(Incoming::Stream(stream)) => {
                         if (self.inner.admit)(&self.key) == Admit::Refuse {
                             return Ok(false);
                         }
-                        let _ = self.inner.accepts.unbounded_send(stream);
+                        if self.confirmed {
+                            let _ = self.inner.accepts.unbounded_send(stream);
+                        } else {
+                            self.early.push(stream);
+                        }
                     }
                     _ => {}
                 }
@@ -713,9 +722,14 @@ impl Endpoint {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use futures::future::BoxFuture;
+
     use super::*;
+    use crate::IceServer;
+    use crate::backend::CHANNELS;
     use crate::fake::{self, Fake};
     use crate::handshake::{Dialer, Offer, Replay};
+    use crate::mux::{OPEN, frame, lane_of};
 
     /// A live, idle link of `class`: a mux over a real handshake and a fake peer. The fake's other end is returned
     /// too, since the fake fails once it is dropped.
@@ -764,6 +778,49 @@ mod tests {
         }
         assert_eq!(st.make_room(Class::Direct).unwrap_err().kind(), io::ErrorKind::ResourceBusy);
         assert_eq!(st.make_room(Class::Relayed).unwrap_err().kind(), io::ErrorKind::ResourceBusy);
+    }
+
+    struct Silent;
+
+    impl Signal for Silent {
+        fn send(&self, _: PublicKey, _: Vec<u8>) -> BoxFuture<'static, io::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn recv(&self) -> BoxFuture<'_, Option<Vec<u8>>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn ice_servers(&self) -> Vec<IceServer> {
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_peers_stream_reaches_accept_only_after_its_hello() {
+        let (us, them) = (SecretKey::generate(), SecretKey::generate());
+        let (dialer, msg1) = Dialer::dial(&them, &us.public(), [1; 16], now_ms(), String::new()).unwrap();
+        let offer = Offer::receive(&us, &Replay::default(), &msg1, now_ms()).unwrap();
+        let (msg2, ours) = offer.answer(&mut Replay::default(), now_ms(), "").unwrap();
+        let (theirs, _) = dialer.finish(&msg2).map_err(|(_, e)| e).unwrap();
+
+        let endpoint = Endpoint::new(us, Silent, |_| Admit::Direct);
+        let (peer, _other) = fake::pair();
+        let (tx, _) = unbounded();
+        let mut link = Link::new(endpoint.0.clone(), them.public(), [1; 16], Class::Direct, false, peer.clone(), tx);
+        link.mux = Some(Mux::new(peer, ours, them.public(), false, DIRECT_BUDGET));
+        endpoint.0.state.lock().unwrap().links.entry(them.public().x25519()).or_default().setup =
+            Some(setup(Class::Direct, false, 1));
+
+        for channel in 0..CHANNELS {
+            link.event(Event::Opened(channel)).await.unwrap();
+        }
+        link.event(Event::Message(lane_of(0), frame(OPEN, 0, b"early"))).await.unwrap();
+        let early = n0_future::time::timeout(Duration::from_millis(200), endpoint.accept()).await;
+        assert!(early.is_err(), "a stream came out before the peer's Hello");
+
+        link.event(Event::Message(0, theirs.seal(0, &[]).unwrap())).await.unwrap();
+        assert_eq!(endpoint.accept().await.unwrap().protocol(), "early");
     }
 
     #[tokio::test]
