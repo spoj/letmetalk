@@ -168,7 +168,8 @@ impl WsSignal {  // feature "ws"
   - n0-future's `BoxFuture` would not do: it isn't `Send` on wasm.
 - **For the bench only,** behind the feature `stats`: `Endpoint::path(peer)` gives the selected candidate pair of the
   link to `peer`. `Path` holds each side's candidate type (`host`, `srflx`, `prflx` or `relay`), `relayed()`, and the RTT
-  of the latest check, which is zero until one is answered. It is None until the link is up.
+  of the latest check, which is zero until one is answered. It is None until the link is up. A remote candidate that
+  webrtc-rs learnt from a check, and so has no stats entry, is reported as `prflx`.
 
 ## Design
 
@@ -354,6 +355,9 @@ impl WsSignal {  // feature "ws"
     default is 1.25 MB. The bench records whether a run was limited by its window.
 - **Reset.** A reset sends `Reset`, then closes the channel. The reader discards what it holds and fails with
   `ConnectionReset`.
+  - A channel's close fails a stream the peer has not finished, but only after 3 s. webrtc-rs can announce a close
+    before the messages that precede it, and a close that failed the stream at once would discard the peer's last
+    bytes.
 
 ### Backends
 
@@ -590,6 +594,34 @@ from apt; the repo's tests run 4.18.
 
 Each pair runs both letmetalk and iroh.
 
+### Bench
+
+`crates/bench` runs one scenario set over three transports: letmetalk natively (`bench`), letmetalk in a browser page
+(the same code as `letmetalk_bench.wasm`, behind `crates/bench/web/index.html`), and iroh 1.3 natively (feature `iroh`,
+direct and relay-only). Decisions:
+- **Roles.** `serve` answers streams by protocol name: `echo` echoes until the peer finishes, `sink` reads to the end and
+  then writes one byte, and `source:<bytes>` writes that many and finishes. It logs in as its key and reports it.
+  `dial` runs every scenario against one peer and prints one JSON object per line: `pair`, `scenario` and the metrics.
+- **Scenarios.**
+  - cold: a fresh login and link, 5 times, timed from opening a stream to its first echoed byte.
+  - warm: after the link is up, 20 more streams, timed the same way.
+  - path: `Endpoint::path`, after the warm streams.
+  - 256 MiB up and down on one stream, and 4 × 64 MiB up at once. Throughput is decimal MB/s, timed until the peer's
+    acknowledgement.
+  - 1,000 100-byte echoes, paced 5 ms apart, idle and then while a sink takes 64 KiB chunks on another stream.
+  - 1 s of ChaCha20-Poly1305 sealing and opening 16 KiB blocks.
+- **One link per measurement.** Each measurement gets a link of its own, formed by an echo before it starts, so that
+  setup is not in its timing.
+- **Peak RSS.** Each native process reports its own `VmHWM`; a server's is read before the harness stops it. Browsers
+  have no RSS figure.
+- **Environment.** `bench-local.sh` records the load average (1, 5, 15 minutes) before and after each run, and
+  `net.core.rmem_max`. Socket buffers matter (spike 2), so the report states them.
+- **Browser.** The page prints its lines into `#out` and sets `#status` to `done` or `failed`. Playwright reads them. The
+  `.wasm` is recorded as wasm-bindgen writes it, raw and gzipped. Nothing shrinks it with `wasm-opt`, so the number is
+  the untuned build.
+- **Encryption.** chacha20poly1305 0.10.1 with the default features off, which is the version and feature set snow
+  uses. The bench times the crate directly. It does not time snow's transport.
+
 ### Decision
 
 The criteria:
@@ -698,6 +730,13 @@ Not in the trial:
 
 ## Risks
 
+- **webrtc-rs can lose a stream's last messages.** Found by the bench. On loopback, sequential streams on one native
+  link fail with `ConnectionReset` after about 40 to 75 of them (`crates/letmetalk/tests/many_streams.rs`, ignored).
+  A channel's close can be announced before the messages that precede it, and those messages then never arrive. A
+  stream the peer has not finished therefore fails only after 3 s, which covers SCTP's 1 s minimum retransmission
+  timeout, but not every loss. The 3 s also delays a refused link's streams by 3 s, which is the price. Until
+  webrtc-rs is fixed, a native link cannot carry more than about 40 streams, so churn and the stream cap cannot be
+  measured natively. This is the first thing to report upstream.
 - **Our own protocol.**
   - The Noise pattern, the ML-KEM secret in the PSK slot and the nonce layout are ours to get right. The primitives
     come from snow and RustCrypto, not from us.

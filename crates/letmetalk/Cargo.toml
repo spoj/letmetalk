@@ -78,3 +78,6 @@ required-features = ["ws"]
 [[test]]
 name = "stats"
 required-features = ["stats"]
+
+[[test]]
+name = "many_streams"

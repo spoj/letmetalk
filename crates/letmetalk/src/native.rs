@@ -308,7 +308,8 @@ impl Peer for Native {
             };
             Some(Path {
                 local: candidate_type(&report, &pair.local_candidate_id)?,
-                remote: candidate_type(&report, &pair.remote_candidate_id)?,
+                // webrtc-rs keeps no entry for a remote candidate learnt from a check, which is peer-reflexive.
+                remote: candidate_type(&report, &pair.remote_candidate_id).unwrap_or_else(|| "prflx".into()),
                 rtt: Duration::from_secs_f64(pair.current_round_trip_time),
             })
         })
