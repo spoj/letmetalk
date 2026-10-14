@@ -31,7 +31,7 @@ const CREDIT: u8 = 5;
 
 /// The lane that carries stream `n`.
 pub(crate) fn lane_of(n: u32) -> u32 {
-    1 + n % LANES
+    1 + (n / 2) % LANES
 }
 
 pub(crate) fn frame(kind: u8, n: u32, body: &[u8]) -> Vec<u8> {

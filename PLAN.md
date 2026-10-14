@@ -316,11 +316,10 @@ impl WsSignal {  // feature "ws"
   - No channel closes before its link does. The link's end is the only close, so no channel drops messages still queued
     on it, and no stream id is freed and reused while the peer's replies are in flight (Risks).
   - Streams open only once the link is confirmed, so no frame reaches a channel its peer has not opened.
-  - Stream `n` rides lane `1 + n % 4`. A lane carries the frames of its streams in both directions. Its sender takes
-    turns between the streams with frames waiting, one frame each, so a large write on one stream does not hold up
-    another stream's small message for long.
-  - Numbers keep their parity, so a dialer's streams use lanes 1 and 3 and an accepter's lanes 2 and 4. Each side's
-    opens therefore share two lanes, and both sides together use all four.
+  - Stream `n` rides lane `1 + (n / 2) % 4`: each pair of numbers shares a lane, and the lanes cycle. A lane carries the
+    frames of its streams in both directions. Its sender takes turns between the streams with frames waiting, one
+    frame each, so a large write on one stream does not hold up another stream's small message for long.
+  - Each side's numbers, of either parity, therefore cycle through all four lanes, so a one-sided workload uses all four.
   - At most 128 streams are open per link in each direction, and at most 16 wait for `accept`. A peer's open beyond
     either is answered with `Reset`; a local open beyond 128 fails with `ResourceBusy`.
 - **Numbers.** Streams are numbered by letmetalk, not by channel.
