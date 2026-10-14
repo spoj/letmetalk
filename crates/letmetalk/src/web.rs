@@ -17,6 +17,8 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::lock::Mutex as AsyncMutex;
 use js_sys::{Array, Promise, Uint8Array};
+#[cfg(feature = "stats")]
+use js_sys::{Map, Reflect, try_iter};
 use n0_future::time::sleep;
 use send_wrapper::SendWrapper;
 use wasm_bindgen::JsCast;
@@ -29,6 +31,8 @@ use web_sys::{
 };
 
 use crate::IceServer;
+#[cfg(feature = "stats")]
+use crate::backend::Path;
 use crate::backend::{Event, Peer};
 
 const CONTROL: u32 = 0;
@@ -47,6 +51,16 @@ fn gone() -> io::Error {
 fn settle(promise: Promise) -> impl Future<Output = io::Result<JsValue>> + Send {
     let future = SendWrapper::new(JsFuture::from(promise));
     async move { future.await.map_err(js) }
+}
+
+#[cfg(feature = "stats")]
+fn field(object: &JsValue, name: &str) -> Option<JsValue> {
+    Reflect::get(object, &name.into()).ok()
+}
+
+#[cfg(feature = "stats")]
+fn text(object: &JsValue, name: &str) -> Option<String> {
+    field(object, name)?.as_string()
 }
 
 fn sdp_of(description: JsValue) -> String {
@@ -322,6 +336,25 @@ impl Peer for Web {
         Box::pin(async {
             let _ = self.inner.events.unbounded_send(Event::Failed);
             self.inner.pc.close();
+        })
+    }
+
+    #[cfg(feature = "stats")]
+    fn path(&self) -> BoxFuture<'_, Option<Path>> {
+        Box::pin(async {
+            let report: Map = settle(self.inner.pc.get_stats()).await.ok()?.unchecked_into();
+            let values = report.values();
+            let transport = try_iter(&values).ok()??.filter_map(Result::ok).find(|s| text(s, "type").as_deref() == Some("transport"))?;
+            let pair = report.get(&JsValue::from_str(&text(&transport, "selectedCandidatePairId")?));
+            let candidate = |name: &str| {
+                let id = JsValue::from_str(&text(&pair, name)?);
+                text(&report.get(&id), "candidateType")
+            };
+            Some(Path {
+                local: candidate("localCandidateId")?,
+                remote: candidate("remoteCandidateId")?,
+                rtt: Duration::from_secs_f64(field(&pair, "currentRoundTripTime")?.as_f64()?),
+            })
         })
     }
 }

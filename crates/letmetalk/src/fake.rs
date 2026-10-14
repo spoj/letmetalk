@@ -72,4 +72,9 @@ impl Peer for Fake {
     fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async { let _ = self.other.unbounded_send(Event::Failed); })
     }
+
+    #[cfg(feature = "stats")]
+    fn path(&self) -> BoxFuture<'_, Option<crate::backend::Path>> {
+        Box::pin(async { None })
+    }
 }

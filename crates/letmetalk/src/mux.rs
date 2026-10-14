@@ -186,6 +186,11 @@ impl Mux {
         &self.transport
     }
 
+    #[cfg(feature = "stats")]
+    pub(crate) async fn path(&self) -> Option<crate::backend::Path> {
+        self.peer.path().await
+    }
+
     pub(crate) fn streams(&self) -> usize {
         self.state.lock().unwrap().streams.len()
     }

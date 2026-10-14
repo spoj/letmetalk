@@ -1,6 +1,25 @@
 use std::io;
+#[cfg(feature = "stats")]
+use std::time::Duration;
 
 use futures::future::BoxFuture;
+
+/// The selected candidate pair of a link: each side's candidate type (`host`, `srflx`, `prflx` or `relay`), and the
+/// round-trip time of its latest check, zero until one is answered.
+#[cfg(feature = "stats")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Path {
+    pub local: String,
+    pub remote: String,
+    pub rtt: Duration,
+}
+
+#[cfg(feature = "stats")]
+impl Path {
+    pub fn relayed(&self) -> bool {
+        self.local == "relay" || self.remote == "relay"
+    }
+}
 
 /// What a peer connection reports. Channels are numbered by letmetalk; channel 0 is the control channel.
 pub(crate) enum Event {
@@ -29,6 +48,8 @@ pub(crate) trait Peer: Send + Sync {
     /// The next event; None once the connection is gone.
     fn next(&self) -> BoxFuture<'_, Option<Event>>;
     fn close(&self) -> BoxFuture<'_, ()>;
+    #[cfg(feature = "stats")]
+    fn path(&self) -> BoxFuture<'_, Option<Path>>;
 }
 
 #[cfg(not(target_arch = "wasm32"))]

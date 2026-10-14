@@ -129,6 +129,9 @@ impl Endpoint {  // Clone
     pub async fn accept(&self) -> Option<Stream>;
     /// Closes the link to `peer`, and so its streams.
     pub fn disconnect(&self, peer: PublicKey);
+    /// Feature `stats`, for the bench only: the selected candidate pair of the link to `peer`.
+    #[cfg(feature = "stats")]
+    pub async fn path(&self, peer: PublicKey) -> Option<Path>;
     pub async fn close(&self);
 }
 
@@ -163,8 +166,9 @@ impl WsSignal {  // feature "ws"
   - On wasm, JS objects are held in `SendWrapper`, which is safe because wasm32-unknown-unknown has one thread.
   - With the `futures` crate's `BoxFuture`, the types and the `Signal` bound are then the same on both targets.
   - n0-future's `BoxFuture` would not do: it isn't `Send` on wasm.
-- **For the bench only,** behind the feature `stats`: `Endpoint::path(peer)` gives the link's route (relayed or direct)
-  and its RTT.
+- **For the bench only,** behind the feature `stats`: `Endpoint::path(peer)` gives the selected candidate pair of the
+  link to `peer`. `Path` holds each side's candidate type (`host`, `srflx`, `prflx` or `relay`), `relayed()`, and the RTT
+  of the latest check, which is zero until one is answered. It is None until the link is up.
 
 ## Design
 
