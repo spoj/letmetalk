@@ -210,6 +210,9 @@ impl WsSignal {  // feature "ws"
     so the authenticated handshake pins DTLS to the two keys.
   - The offer's fingerprint travels in message 1, which only the accepter can read. The answer's travels in message 2,
     which only the dialer can read, since its keys need the dialer's static key.
+  - Before applying a peer's SDP, each side refuses one with an `a=candidate` or `a=ice-lite` line, or without exactly
+    one `a=fingerprint:sha-256` line. A candidate would aim ICE checks at this side, and the check keeps browsers from
+    taking a weaker hash.
 - **Nothing for a forger.**
   - The peer's answer and candidates are sealed to the dialer's live ephemeral and static keys.
   - The dialer's candidates come only after message 2, sealed with keys that need both of those.
@@ -231,8 +234,9 @@ impl WsSignal {  // feature "ws"
   - An offer whose session id is already in progress is refused, so it cannot take over that session's routing.
 - **Libraries:** snow (RustCrypto resolver) and getrandom. snow builds for wasm32 with its default features off.
 - **Why not HPKE envelopes and signatures:** they would be neither deniable nor forward secret for the answer.
-  One Noise handshake gives authentication, deniability, forward secrecy after message 1, and resistance to
-  key-compromise impersonation once the link confirms.
+  One Noise handshake gives authentication, deniability, forward secrecy after message 1, and, through `Hello`,
+  resistance to key-compromise impersonation. Before `Hello`, ICE and DTLS give no protection against a holder of only
+  the accepter's key, but no stream it opens reaches the app.
 
 ### Links
 

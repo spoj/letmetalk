@@ -14,7 +14,7 @@ use futures::lock::Mutex as AsyncMutex;
 use n0_future::task::spawn;
 use n0_future::time::{SystemTime, sleep, timeout};
 
-use crate::backend::{Event, Peer, peer};
+use crate::backend::{Event, Peer, check_sdp, peer};
 use crate::handshake::{Dialer, Kind, Offer, Replay, Transport, route};
 use crate::keys::{PublicKey, SecretKey};
 use crate::mux::{Incoming, Mux};
@@ -545,6 +545,7 @@ impl Link {
     }
 
     async fn accept_offer(&mut self, offer: Offer) -> io::Result<Vec<u8>> {
+        check_sdp(&offer.sdp)?;
         let sdp = self.peer.answer(&offer.sdp).await?;
         let (reply, transport) = offer.answer(&mut self.inner.state.lock().unwrap().replay, now_ms(), &sdp)?;
         self.key_up(transport).await?;
@@ -559,6 +560,7 @@ impl Link {
                 if let Some(dialer) = self.dialer.take() {
                     match dialer.finish(&envelope) {
                         Ok((transport, sdp)) => {
+                            check_sdp(&sdp)?;
                             self.peer.accept(&sdp).await?;
                             self.key_up(transport).await?;
                         }

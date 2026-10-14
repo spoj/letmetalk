@@ -62,3 +62,40 @@ pub(crate) use crate::native::peer;
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) use crate::web::peer;
+
+/// Refuses a peer's SDP that carries candidates or ice-lite, which would aim ICE checks at this side, or that does not
+/// pin DTLS to exactly one SHA-256 certificate.
+pub(crate) fn check_sdp(sdp: &str) -> io::Result<()> {
+    let lines: Vec<&str> = sdp.lines().collect();
+    let aimed = lines.iter().any(|l| l.starts_with("a=candidate") || *l == "a=ice-lite");
+    let prints = lines.iter().filter(|l| l.starts_with("a=fingerprint:")).count();
+    let sha256 = lines.iter().filter(|l| l.starts_with("a=fingerprint:sha-256 ")).count();
+    if aimed || prints != 1 || sha256 != 1 {
+        return Err(io::Error::other("peer's SDP has candidates, ice-lite, or not one sha-256 fingerprint"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_sdp;
+
+    fn sdp(extra: &str) -> String {
+        format!("v=0\r\na=fingerprint:sha-256 AA:BB\r\n{extra}")
+    }
+
+    #[test]
+    fn an_sdp_with_one_sha256_fingerprint_passes() {
+        check_sdp(&sdp("m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n")).unwrap();
+        assert!(check_sdp("v=0\r\n").is_err());
+    }
+
+    #[test]
+    fn candidates_ice_lite_and_other_fingerprints_are_refused() {
+        assert!(check_sdp(&sdp("a=candidate:1 1 udp 1 10.0.0.1 9 typ host\r\n")).is_err());
+        assert!(check_sdp(&sdp("a=ice-lite\r\n")).is_err());
+        assert!(check_sdp(&sdp("a=fingerprint:sha-256 CC:DD\r\n")).is_err());
+        assert!(check_sdp(&sdp("a=fingerprint:sha-1 CC:DD\r\n")).is_err());
+        assert!(check_sdp("v=0\r\na=fingerprint:sha-1 AA:BB\r\n").is_err());
+    }
+}
