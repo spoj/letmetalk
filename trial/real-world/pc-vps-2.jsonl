@@ -1,0 +1,9 @@
+{"pair":"pc-vps","scenario":"cold","median_ms":954.9171,"samples_ms":[978.0876,954.9171,426.5063,1771.2261,469.4882]}
+{"pair":"pc-vps","scenario":"warm","median_ms":36.6391,"samples_ms":[37.3956,36.7817,37.61,36.5845,36.6391,35.758900000000004,34.8785,36.2316,34.9327,36.3371,37.375699999999995,34.8018,39.7389,36.7402
+{"pair":"pc-vps","scenario":"path","route":{"local":"host","relayed":false,"remote":"host","rtt_ms":35.7044}}
+{"pair":"pc-vps","scenario":"bulk_up","bytes":67108864,"mb_s":4.2250005567009365,"secs":15.8837527}
+{"pair":"pc-vps","scenario":"bulk_down","bytes":67108864,"mb_s":1.424543118034043,"secs":47.1090437}
+{"pair":"pc-vps","scenario":"bulk_4x64","bytes":67108864,"mb_s":4.765302161911674,"secs":14.082814}
+{"pair":"pc-vps","scenario":"latency_idle","n":1000,"p50_ms":35.9005,"p95_ms":37.252599999999994,"p99_ms":39.6149}
+{"pair":"pc-vps","scenario":"latency_load","bulk_mb_s":14.0042236034807,"echo":{"n":1000,"p50_ms":60.449200000000005,"p95_ms":135.368,"p99_ms":526.8948}}
+{"pair":"pc-vps","peak_rss_kib":null,"scenario":"rss"}

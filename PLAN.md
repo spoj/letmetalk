@@ -638,8 +638,9 @@ Each pair runs both letmetalk and iroh.
 ### Bench
 
 `crates/bench` runs one scenario set over three transports: letmetalk natively (`bench`), letmetalk in a browser page
-(the same code as `letmetalk_bench.wasm`, behind `crates/bench/web/index.html`), and iroh 1.3 natively (feature `iroh`,
-direct and relay-only). Decisions:
+(the same code as `letmetalk_bench.wasm`, behind `crates/bench/web/index.html`), and iroh 1.3 natively (feature `iroh`:
+direct on loopback, relay-only as a browser's path, or with `--direct` iroh's own relay and direct paths, as a native
+letmeknow peer runs). Decisions:
 - **Roles.** `serve` answers streams by protocol name: `echo` echoes until the peer finishes, `sink` reads to the end and
   then writes one byte, and `source:<bytes>` writes that many and finishes. It logs in as its key and reports it.
   `dial` runs every scenario against one peer and prints one JSON object per line: `pair`, `scenario` and the metrics.

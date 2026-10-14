@@ -1,0 +1,8 @@
+{"pair":"pcchrome-vps","scenario":"cold","median_ms":452.0,"samples_ms":[452.0,544.0,383.0,556.0,436.0]}
+{"pair":"pcchrome-vps","scenario":"warm","median_ms":40.0,"samples_ms":[40.0,41.0,39.0,37.0,38.0,35.0,40.0,41.0,40.0,38.0,35.0,39.0,42.0,42.0,40.0,39.0,43.0,39.0,40.0,37.0]}
+{"pair":"pcchrome-vps","scenario":"path","route":{"local":"host","relayed":false,"remote":"host","rtt_ms":34.5}}
+{"pair":"pcchrome-vps","scenario":"bulk_up","bytes":67108864,"mb_s":5.906950444503125,"secs":11.361}
+{"pair":"pcchrome-vps","scenario":"bulk_down","bytes":67108864,"mb_s":3.159997363092716,"secs":21.237}
+{"pair":"pcchrome-vps","scenario":"bulk_4x64","bytes":67108864,"mb_s":7.116528525980912,"secs":9.43}
+{"pair":"pcchrome-vps","scenario":"latency_idle","n":1000,"p50_ms":36.0,"p95_ms":38.0,"p99_ms":41.0}
+{"pair":"pcchrome-vps","scenario":"latency_load","bulk_mb_s":9.308562473005493,"echo":{"n":1000,"p50_ms":109.0,"p95_ms":128.0,"p99_ms":142.0}}

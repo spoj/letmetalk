@@ -1,0 +1,16 @@
+{"pair":"pc-vps-iroh","scenario":"cold","median_ms":531.9177999999999,"samples_ms":[503.3495,533.8085,531.9177999999999,545.8570000000001,486.5265]}
+{"pair":"pc-vps-iroh","scenario":"warm","median_ms":36.413399999999996,"samples_ms":[103.7175,36.3593,36.1261,36.413399999999996,36.207,35.2819,34.619499999999995,34.249500000000005,36.418600000000005,40.7603,37.572500000000005,35.4086,37.9255,36.897
+{"pair":"pc-vps-iroh","scenario":"path","route":{"local":"Ip(Some(2404:c805:4655:7d00:2cb4:bb00:2dca:f173))","relayed":false,"remote":"ip:[2400:6180:0:d2:0:3:37cd:7000]:33739","rtt_ms":38.881679000000005}}
+{"pair":"pc-vps-iroh","scenario":"bulk_up","bytes":16777216,"mb_s":19.877047524571125,"secs":0.8440497}
+{"pair":"pc-vps-iroh","scenario":"bulk_down","bytes":16777216,"mb_s":18.647316180364808,"secs":0.8997121}
+{"pair":"pc-vps-iroh","scenario":"bulk_4x64","bytes":16777216,"mb_s":26.31729238908746,"secs":0.6374978}
+{"pair":"pc-vps-iroh","scenario":"latency_idle","n":1000,"p50_ms":35.3691,"p95_ms":35.9781,"p99_ms":37.753299999999996}
+{"pair":"pc-vps-iroh","scenario":"latency_load","bulk_mb_s":30.82381006838079,"echo":{"n":1000,"p50_ms":35.174,"p95_ms":39.131699999999995,"p99_ms":46.6901}}
+{"pair":"pc-vps-iroh","peak_rss_kib":null,"scenario":"rss"}
+{"pair":"pc-vps-irohrelay","scenario":"cold","median_ms":482.6881,"samples_ms":[466.8016,483.5329,482.6881,447.9227,485.74830000000003]}
+{"pair":"pc-vps-irohrelay","scenario":"warm","median_ms":86.7497,"samples_ms":[89.60650000000001,86.4677,86.6635,86.55590000000001,86.5159,86.86290000000001,86.97779999999999,86.9685,86.76209999999999,86.62440000000001,86.7497,87.04249999999999,88.16
+{"pair":"pc-vps-irohrelay","scenario":"path","route":{"local":"Relay(RelayUrl(\"https://relay.letmeknow.dev/\"))","relayed":true,"remote":"relay:https://relay.letmeknow.dev/","rtt_ms":98.152316}}
+{"pair":"pc-vps-irohrelay","scenario":"bulk_up","bytes":16777216,"mb_s":0.9690396538662877,"secs":17.3132399}
+{"pair":"pc-vps-irohrelay","scenario":"bulk_down","bytes":16777216,"mb_s":1.007560933695543,"secs":16.6513165}
+{"pair":"pc-vps-irohrelay","scenario":"bulk_4x64","bytes":16777216,"mb_s":0.964330396894934,"secs":17.3977882}
+{"pair":"pc-vps-irohrelay","scenario":"latency_idle","n":1000,"p50_ms":36.2083,"p95_ms":38.3453,"p99_ms":41.6277}
