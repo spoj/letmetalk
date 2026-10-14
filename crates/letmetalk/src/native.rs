@@ -113,6 +113,7 @@ impl Shared {
             while let Some(event) = dc.poll().await {
                 let event = match event {
                     DataChannelEvent::OnOpen => Event::Ready(n),
+                    DataChannelEvent::OnMessage(message) if message.is_string => Event::Failed,
                     DataChannelEvent::OnMessage(message) => Event::Message(n, message.data.to_vec()),
                     DataChannelEvent::OnClose => {
                         shared.channels.lock().unwrap().remove(&n);
@@ -179,13 +180,18 @@ fn other(e: webrtc::error::Error) -> io::Error {
 }
 
 pub(crate) fn peer(ice: &[IceServer], relay_only: bool) -> BoxFuture<'static, io::Result<Arc<dyn Peer>>> {
+    let native = native(ice, relay_only);
+    Box::pin(async move { Ok(Arc::new(native.await?) as Arc<dyn Peer>) })
+}
+
+fn native(ice: &[IceServer], relay_only: bool) -> impl Future<Output = io::Result<Native>> + Send + 'static {
     let servers: Vec<RTCIceServer> = ice
         .iter()
         .map(|s| RTCIceServer { urls: s.urls.clone(), username: s.username.clone(), credential: s.credential.clone() })
         .collect();
     let policy = if relay_only { RTCIceTransportPolicy::Relay } else { RTCIceTransportPolicy::All };
     let config = RTCConfigurationBuilder::new().with_ice_servers(servers).with_ice_transport_policy(policy).build();
-    Box::pin(async move {
+    async move {
         let (events, rx) = unbounded();
         let shared = Arc::new(Shared { events, channels: Mutex::new(HashMap::new()) });
         let pc = PeerConnectionBuilder::new()
@@ -196,8 +202,8 @@ pub(crate) fn peer(ice: &[IceServer], relay_only: bool) -> BoxFuture<'static, io
             .build()
             .await
             .map_err(other)?;
-        Ok(Arc::new(Native { pc: Arc::new(pc), shared, events: AsyncMutex::new(rx) }) as Arc<dyn Peer>)
-    })
+        Ok(Native { pc: Arc::new(pc), shared, events: AsyncMutex::new(rx) })
+    }
 }
 
 impl Peer for Native {
@@ -349,6 +355,18 @@ mod tests {
             socket2::SockRef::from(&probe).recv_buffer_size().unwrap(),
             direct.recv_buffer_size().unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn a_text_message_fails_the_link() {
+        let a = native(&[], false).await.unwrap();
+        let b = native(&[], false).await.unwrap();
+        connect(&a, &b).await;
+        until(&a, |e| matches!(e, Event::Ready(1))).await;
+        until(&b, |e| matches!(e, Event::Opened(1))).await;
+        a.shared.channel(1).unwrap().send_text("text").await.unwrap();
+        let event = until(&b, |e| matches!(e, Event::Failed | Event::Message(..))).await;
+        assert!(matches!(event, Event::Failed));
     }
 
     #[tokio::test]

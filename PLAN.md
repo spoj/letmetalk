@@ -337,7 +337,7 @@ impl WsSignal {  // feature "ws"
   - A stream ends when both sides have sent `Finish`, or either has sent `Reset`. A frame or `Credit` for a stream that
     has ended is ignored. A number at or below its lane's last `Open` counts as ended.
   - These fail the link: a frame for a number never opened that is not an `Open`, including a `Credit` for one; a frame
-    on the wrong lane; `Data` after the peer's `Finish`; and anything malformed.
+    on the wrong lane; `Data` after the peer's `Finish`; a text message on any channel; and anything malformed.
 - **Credit before Open.** The control channel and the lanes are separate channels, so their order is not kept. A side
   therefore grants credit on a stream it opened only after the peer's first frame on it, which shows that the `Open`
   arrived. Until then, the stream has its first 16 KiB, which needs no message.
