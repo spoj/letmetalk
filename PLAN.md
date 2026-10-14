@@ -168,7 +168,8 @@ impl WsSignal {  // feature "ws"
   - n0-future's `BoxFuture` would not do: it isn't `Send` on wasm.
 - **For the bench only,** behind the feature `stats`: `Endpoint::path(peer)` gives the selected candidate pair of the
   link to `peer`. `Path` holds each side's candidate type (`host`, `srflx`, `prflx` or `relay`), `relayed()`, and the RTT
-  of the latest check, which is zero until one is answered. It is None until the link is up. A remote candidate that
+  of the checks, which is zero until one is answered: the latest check on native, and the mean of the answered checks in a
+  browser, where Chrome leaves the latest at zero. It is None until the link is up. A remote candidate that
   webrtc-rs learnt from a check, and so has no stats entry, is reported as `prflx`.
 
 ## Design

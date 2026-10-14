@@ -323,7 +323,12 @@ impl Peer for Web {
             Some(Path {
                 local: candidate("localCandidateId")?,
                 remote: candidate("remoteCandidateId")?,
-                rtt: Duration::from_secs_f64(field(&pair, "currentRoundTripTime")?.as_f64()?),
+                rtt: {
+                    // Chrome leaves `currentRoundTripTime` at zero, so the mean of the answered checks is used.
+                    let answered = field(&pair, "responsesReceived")?.as_f64()?;
+                    let total = field(&pair, "totalRoundTripTime")?.as_f64()?;
+                    Duration::from_secs_f64(if answered > 0.0 { total / answered } else { 0.0 })
+                },
             })
         })
     }
