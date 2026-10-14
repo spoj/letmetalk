@@ -15,7 +15,6 @@ use futures::future::BoxFuture;
 use futures::lock::Mutex as AsyncMutex;
 use futures::StreamExt;
 use n0_future::task::spawn;
-use n0_future::time::sleep;
 use webrtc::data_channel::{DataChannel, DataChannelEvent};
 use webrtc::runtime::{AsyncInterval, AsyncTcpListener, AsyncTcpStream, AsyncUdpSocket, JoinHandle, Runtime, default_runtime};
 use webrtc::peer_connection::{
@@ -27,7 +26,7 @@ use webrtc::peer_connection::{
 use webrtc::peer_connection::{RTCStatsReport, RTCStatsReportEntry, StatsSelector};
 
 use crate::IceServer;
-use crate::backend::{CLOSE_DRAIN, Event, Peer};
+use crate::backend::{Event, Peer};
 #[cfg(feature = "stats")]
 use crate::backend::Path;
 
@@ -267,18 +266,9 @@ impl Peer for Native {
         })
     }
 
-    /// Closes once SCTP has acknowledged what was sent: webrtc-rs's close can overtake data still in flight. A peer
-    /// that never acknowledges is given up on after 10 s.
     fn close_channel(&self, channel: u32) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             if let Ok(dc) = self.shared.channel(channel) {
-                for _ in 0..400 {
-                    if !dc.outstanding_bytes().await.is_ok_and(|n| n > 0) {
-                        break;
-                    }
-                    sleep(Duration::from_millis(25)).await;
-                }
-                sleep(CLOSE_DRAIN).await;
                 let _ = dc.close().await;
             }
         })

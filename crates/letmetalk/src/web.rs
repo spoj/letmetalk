@@ -17,7 +17,6 @@ use futures::lock::Mutex as AsyncMutex;
 use js_sys::{Array, ArrayBuffer, Promise, Uint8Array};
 #[cfg(feature = "stats")]
 use js_sys::{Map, Reflect, try_iter};
-use n0_future::time::sleep;
 use send_wrapper::SendWrapper;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::{Closure, JsValue};
@@ -31,7 +30,7 @@ use web_sys::{
 use crate::IceServer;
 #[cfg(feature = "stats")]
 use crate::backend::Path;
-use crate::backend::{CLOSE_DRAIN, Event, Peer};
+use crate::backend::{Event, Peer};
 
 const CONTROL: u32 = 0;
 
@@ -280,7 +279,6 @@ impl Peer for Web {
 
     fn close_channel(&self, channel: u32) -> BoxFuture<'_, ()> {
         Box::pin(async move {
-            sleep(CLOSE_DRAIN).await;
             self.inner.close_lane(channel);
         })
     }

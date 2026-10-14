@@ -1,14 +1,15 @@
 //! The stream layer over one peer connection: numbers, sealing, messages and credit.
 
 use std::collections::{BTreeSet, HashMap};
+use std::future::poll_fn;
 use std::io;
 use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
 
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::channel::oneshot;
 use n0_future::task::spawn;
-use n0_future::time::sleep;
 
 use crate::backend::{Event, Peer};
 use crate::handshake::Transport;
@@ -16,7 +17,6 @@ use crate::keys::PublicKey;
 use crate::stream::{Io, IoState, Stream};
 
 pub(crate) const CONTROL: u32 = 0;
-const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 const LAST: u32 = (1 << 24) - 1;
 const WINDOW: u32 = 1024;
 pub(crate) const CHUNK: usize = 16 * 1024;
@@ -33,6 +33,7 @@ pub(crate) enum Plain {
     Hello,
     Credit(u32, u32),
     Reset(u32),
+    Closed(u32),
 }
 
 impl Plain {
@@ -44,6 +45,7 @@ impl Plain {
             Plain::Hello => vec![4],
             Plain::Credit(n, bytes) => [&[5][..], &n.to_be_bytes(), &bytes.to_be_bytes()].concat(),
             Plain::Reset(n) => [&[6][..], &n.to_be_bytes()].concat(),
+            Plain::Closed(n) => [&[7][..], &n.to_be_bytes()].concat(),
         }
     }
 
@@ -60,6 +62,7 @@ impl Plain {
             (4, 1) => Plain::Hello,
             (5, 9) => Plain::Credit(be32(&bytes[1..5]), be32(&bytes[5..9])),
             (6, 5) => Plain::Reset(be32(&bytes[1..5])),
+            (7, 5) => Plain::Closed(be32(&bytes[1..5])),
             _ => return Err(bad()),
         })
     }
@@ -71,6 +74,12 @@ fn be32(bytes: &[u8]) -> u32 {
 
 pub(crate) fn reset() -> io::Error {
     io::Error::new(io::ErrorKind::ConnectionReset, "stream reset")
+}
+
+fn wake_waiters(st: &mut State) {
+    for waker in st.release_waiters.drain(..) {
+        waker.wake();
+    }
 }
 
 /// The stream numbers a peer has opened. Each must have the peer's parity and be new, within a window of
@@ -107,6 +116,9 @@ struct State {
     control_index: u64,
     control_open: bool,
     dead: bool,
+    own_channels: BTreeSet<u32>,
+    releasing: BTreeSet<u32>,
+    release_waiters: Vec<Waker>,
 }
 
 pub(crate) struct Mux {
@@ -145,8 +157,9 @@ async fn send_loop(mux: Arc<Mux>, number: u32, start: oneshot::Receiver<()>, mut
         index += 1;
         let sealed = mux.transport.seal(nonce, &plain.encode()).expect("messages fit the cipher");
         if full || mux.peer.send(number, sealed).await.is_err() {
-            mux.fail_stream(number, true);
-            mux.close_later(number);
+            let mut st = mux.state.lock().unwrap();
+            mux.fail(&mut st, number, true);
+            mux.close_later(&mut st, number);
             return;
         }
         if finish {
@@ -180,6 +193,9 @@ impl Mux {
                 control_index: 0,
                 control_open: false,
                 dead: false,
+                own_channels: BTreeSet::new(),
+                releasing: BTreeSet::new(),
+                release_waiters: Vec::new(),
             }),
         })
     }
@@ -201,6 +217,7 @@ impl Mux {
         if protocol.len() > MAX_PROTOCOL {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "protocol name longer than 255 bytes"));
         }
+        self.released().await?;
         let (number, io) = {
             let mut st = self.state.lock().unwrap();
             if st.dead {
@@ -217,6 +234,7 @@ impl Mux {
             let io = Arc::new(Io::new(number, true, Some(ready), outbox));
             io.state().outbox.unbounded_send(Plain::Open(protocol.to_string())).expect("fresh outbox");
             st.streams.insert(number, io.clone());
+            st.own_channels.insert(number);
             spawn(send_loop(self.clone(), number, start, rx));
             self.grant(&mut st);
             (number, io)
@@ -279,7 +297,6 @@ impl Mux {
         let peers = st.streams.values().filter(|io| !io.own()).count();
         if peers >= MAX_STREAMS {
             self.send_control(Plain::Reset(n))?;
-            self.close_later(n);
             return Ok(());
         }
         let (outbox, rx) = unbounded();
@@ -316,7 +333,21 @@ impl Mux {
                     return Err(io::Error::other("reset of the control channel"));
                 }
                 self.fail(&mut st, n, false);
-                self.close_later(n);
+                self.close_later(&mut st, n);
+                Ok(None)
+            }
+            Plain::Closed(n) => {
+                match st.streams.get(&n).cloned() {
+                    Some(io) => {
+                        io.state().remote_closed = true;
+                        self.settle(&mut st, n);
+                    }
+                    None => {
+                        if st.releasing.remove(&n) {
+                            wake_waiters(&mut st);
+                        }
+                    }
+                }
                 Ok(None)
             }
             _ => Err(io::Error::other("bad control message")),
@@ -338,7 +369,7 @@ impl Mux {
             Ok(pair) => pair,
             Err(_) => {
                 self.fail(&mut st, n, true);
-                self.close_later(n);
+                self.close_later(&mut st, n);
                 return Ok(None);
             }
         };
@@ -354,7 +385,7 @@ impl Mux {
                     .count();
                 if waiting >= MAX_WAITING {
                     self.fail(&mut st, n, true);
-                    self.close_later(n);
+                    self.close_later(&mut st, n);
                     return Ok(None);
                 }
                 io.state().opened = true;
@@ -390,25 +421,36 @@ impl Mux {
         }
     }
 
-    /// webrtc-rs can announce a channel's close before the messages sent ahead of it, so a stream the peer has not
-    /// finished fails only after a grace period, which lets those messages arrive.
-    fn closed(self: &Arc<Self>, n: u32) {
-        let mux = self.clone();
-        spawn(async move {
-            sleep(CLOSE_GRACE).await;
-            let mut st = mux.state.lock().unwrap();
-            if st.streams.get(&n).is_some_and(|io| !io.state().remote_finished) {
-                mux.fail(&mut st, n, false);
-            }
+    /// The peer closed a channel this side did not open. Its stream is done, or fails; either way the close is
+    /// acknowledged, so that the opener may reuse the channel's number. A channel this side opened is closed by its
+    /// own hand, and its close needs nothing.
+    fn closed(&self, n: u32) {
+        if self.opened_here(n) {
+            return;
+        }
+        let mut st = self.state.lock().unwrap();
+        let done = st.streams.get(&n).is_none_or(|io| {
+            let s = io.state();
+            s.remote_finished && s.local_closed
         });
+        if done {
+            st.streams.remove(&n);
+        } else {
+            self.fail(&mut st, n, false);
+        }
+        let _ = self.send_control(Plain::Closed(n));
     }
 
-    /// Records that this side sent (`local`) or received its `Finish`. Once both have, the channel closes.
+    fn opened_here(&self, n: u32) -> bool {
+        n % 2 == u32::from(!self.dialer)
+    }
+
+    /// Records that this side sent (`local`) or received its `Finish`, and settles the close.
     fn finished(&self, st: &mut State, n: u32, local: bool) {
         let Some(io) = st.streams.get(&n).cloned() else {
             return;
         };
-        let both = {
+        {
             let mut s = io.state();
             if local {
                 s.local_finished = true;
@@ -418,21 +460,30 @@ impl Mux {
             if let Some(waker) = s.read_waker.take() {
                 waker.wake();
             }
-            s.local_finished && s.remote_finished
-        };
-        if both {
-            self.close_later(n);
         }
-        self.reap(st, n);
+        self.settle(st, n);
     }
 
-    /// Removes a finished stream once the app has read all of it.
-    fn reap(&self, st: &mut State, n: u32) {
-        if st.streams.get(&n).is_some_and(|io| {
-            let s = io.state();
-            s.local_finished && s.remote_finished && s.inbox.is_empty()
-        }) {
+    /// Once both finishes are known, sends `Closed`. Once it is sent and the peer's is received, the channel closes.
+    /// Each side has then read all the other sent, since each sent `Closed` only after the other's `Finish`.
+    fn settle(&self, st: &mut State, n: u32) {
+        let Some(io) = st.streams.get(&n).cloned() else {
+            return;
+        };
+        let (send, close) = {
+            let mut s = io.state();
+            let send = s.local_finished && s.remote_finished && !s.local_closed;
+            if send {
+                s.local_closed = true;
+            }
+            (send, s.local_closed && s.remote_closed)
+        };
+        if send {
+            let _ = self.send_control(Plain::Closed(n));
+        }
+        if close {
             st.streams.remove(&n);
+            self.close_later(st, n);
         }
     }
 
@@ -458,11 +509,35 @@ impl Mux {
         for (_, io) in st.streams.drain() {
             io.fail();
         }
+        wake_waiters(&mut st);
     }
 
-    fn close_later(&self, n: u32) {
-        let peer = self.peer.clone();
-        spawn(async move { peer.close_channel(n).await });
+    /// Closes the channel of stream `n`, if this side opened it. Until the peer acknowledges the close, the number
+    /// is in `releasing`, and `released` holds this side's new streams.
+    fn close_later(&self, st: &mut State, n: u32) {
+        if st.own_channels.remove(&n) {
+            st.releasing.insert(n);
+            let peer = self.peer.clone();
+            spawn(async move { peer.close_channel(n).await });
+        }
+    }
+
+    /// Waits until the peer has acknowledged every channel this side closed. webrtc-rs frees a closed channel's SCTP
+    /// stream id at once, but the peer's reset for it can arrive later and close a new channel that took the id. The
+    /// acknowledgement comes after that reset has been processed.
+    async fn released(&self) -> io::Result<()> {
+        poll_fn(|cx| {
+            let mut st = self.state.lock().unwrap();
+            if st.dead {
+                Poll::Ready(Err(reset()))
+            } else if st.releasing.is_empty() {
+                Poll::Ready(Ok(()))
+            } else {
+                st.release_waiters.push(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
     }
 
     /// Grants credit to each stream. Each keeps its first 16 KiB outside the budget; above that, streams share what
@@ -491,11 +566,10 @@ impl Mux {
         }
     }
 
-    /// Called when the app reads from, or accepts, a stream.
-    pub(crate) fn consumed(&self, n: u32) {
+    /// Called when the app reads from a stream.
+    pub(crate) fn consumed(&self) {
         let mut st = self.state.lock().unwrap();
         self.grant(&mut st);
-        self.reap(&mut st, n);
     }
 
     pub(crate) fn accept(&self, n: u32) {
@@ -506,20 +580,15 @@ impl Mux {
         }
     }
 
-    /// Called when a stream's handle drops. A stream that finished sending keeps discarding what the peer
-    /// still sends, so the peer can finish. Any other stream is reset.
+    /// Called when a stream's handle drops. A stream that has shut down keeps discarding what the peer still sends,
+    /// so the peer can finish, and its channel closes through the close handshake. Any other stream is reset.
     pub(crate) fn dropped(&self, n: u32) {
         let mut st = self.state.lock().unwrap();
         let Some(io) = st.streams.get(&n).cloned() else {
             return;
         };
-        let (done, shut) = {
-            let s = io.state();
-            (s.local_finished && s.remote_finished, s.queued_finish)
-        };
-        if done {
-            st.streams.remove(&n);
-        } else if shut {
+        let shut = io.state().queued_finish;
+        if shut {
             {
                 let mut s = io.state();
                 s.discard = true;
@@ -529,7 +598,7 @@ impl Mux {
             self.grant(&mut st);
         } else {
             self.fail(&mut st, n, true);
-            self.close_later(n);
+            self.close_later(&mut st, n);
         }
     }
 }
@@ -655,6 +724,33 @@ mod tests {
         b.shutdown().await.unwrap();
         a.read_to_end(&mut rest).await.unwrap();
         assert!(rest.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stream_leaves_the_link_once_both_sides_finish() {
+        let mut p = pair();
+        let mut a = p.a.open("echo").await.unwrap();
+        let mut b = p.accepts.next().await.unwrap();
+        b.accept();
+        a.shutdown().await.unwrap();
+        let mut rest = Vec::new();
+        b.read_to_end(&mut rest).await.unwrap();
+        b.shutdown().await.unwrap();
+        a.read_to_end(&mut rest).await.unwrap();
+        n0_future::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(p.a.streams() + p.b.streams(), 0);
+    }
+
+    #[tokio::test]
+    async fn channel_closed_before_finish_fails_the_stream_at_once() {
+        let mut p = pair();
+        let _a = p.a.open("raw").await.unwrap();
+        let mut b = p.accepts.next().await.unwrap();
+        b.accept();
+        p.a_peer.close_channel(2).await;
+        let mut buf = [0; 1];
+        let read = n0_future::time::timeout(Duration::from_millis(100), b.read(&mut buf)).await;
+        assert_eq!(read.expect("fails within 100 ms").unwrap_err().kind(), io::ErrorKind::ConnectionReset);
     }
 
     #[tokio::test]

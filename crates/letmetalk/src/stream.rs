@@ -29,6 +29,8 @@ pub(crate) struct IoState {
     pub(crate) queued_finish: bool,
     pub(crate) local_finished: bool,
     pub(crate) remote_finished: bool,
+    pub(crate) local_closed: bool,
+    pub(crate) remote_closed: bool,
     pub(crate) failed: bool,
     pub(crate) discard: bool,
     pub(crate) read_waker: Option<Waker>,
@@ -65,6 +67,8 @@ impl Io {
                 queued_finish: false,
                 local_finished: false,
                 remote_finished: false,
+                local_closed: false,
+                remote_closed: false,
                 failed: false,
                 discard: false,
                 read_waker: None,
@@ -140,7 +144,7 @@ impl AsyncRead for Stream {
         s.inbox.drain(..n);
         s.read += n;
         drop(s);
-        self.mux.consumed(self.io.number);
+        self.mux.consumed();
         Poll::Ready(Ok(()))
     }
 }

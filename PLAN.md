@@ -295,10 +295,15 @@ impl WsSignal {  // feature "ws"
 ### Streams
 
 - **Channels.** Each stream is one data channel, reliable and ordered, opened in band (DCEP).
-  - Native closes wait until SCTP has acknowledged what was sent, for at most 10 s. A browser's close needs no such
-    wait: it flushes what was queued. Either close then waits 200 ms more, so that the peer drains what it holds:
-    webrtc-rs drops a channel's queued messages when its close is processed (found by the bench, which lost a sink's
-    acknowledgement this way).
+  - The opener closes its channel, and only the opener does, once the stream is done (Messages: `Closed`). The
+    accepter's channel closes with the opener's reset, and a close that comes before the stream is done fails it at
+    once. A browser's close flushes what was queued; webrtc-rs drops a channel's queued messages when its close is
+    processed, which is why nothing is closed before the peer has read everything.
+  - webrtc-rs frees a closed channel's SCTP stream id at once, but the reset the peer sends in reply arrives about one
+    round trip later, and it closes whatever channel holds the id by then. So after a close, the opener opens no channel
+    until the accepter acknowledges the close with `Closed`, which it sends once its channel has closed. Without the
+    wait, native streams opened right after a close failed in every run of `many_streams`; a 5 ms pause before each open
+    also cured it.
   - Streams open only once the link is confirmed. That also avoids a webrtc-rs bug: a channel the answering side opens
     just after ICE connects, before SCTP is up, never opens.
   - A browser opener writes at once. A native opener waits for the peer's DCEP ack.
@@ -329,11 +334,15 @@ impl WsSignal {  // feature "ws"
   - Since numbers are never reused, and the peer's are checked, no nonce repeats under a key.
 - **Messages.** Plaintexts start with a type:
   - on a stream: `Open(protocol)` (the first message), `Data`, `Finish`;
-  - on the control channel: `Hello`, `Credit(stream, bytes)`, `Reset(stream)`.
+  - on the control channel: `Hello`, `Credit(stream, bytes)`, `Reset(stream)`, `Closed(stream)`.
   - A `Data` after the peer's `Finish`, and a `Reset` of the control channel, fail the link.
+  - `Closed(stream)` is sent once a side has sent its `Finish` and received the peer's. Once a side has sent and received
+    `Closed`, the stream is done. The peer sends `Closed` only after our `Finish`, so it has read everything we sent.
+  - The accepter also sends `Closed(stream)` once its channel has closed, as the acknowledgement described under
+    Channels. The opener takes it as one, since the stream is already gone on its side.
 
   Data goes in messages of at most 16 KiB, so a small message on one stream never waits behind a large one on another.
-  Data channels have no half-close, so `Finish` stands in for one, and a channel closes once both sides have finished.
+  Data channels have no half-close, so `Finish` stands in for one.
 - **Flow control.** SCTP has one receive window per link, not one per stream (RFC 9260). So on native, one slow reader
   would stall every stream, the control channel included. And browsers deliver messages as events, with no back-pressure
   at all. So each stream gets its own window, under a budget for its link:
@@ -352,9 +361,8 @@ impl WsSignal {  // feature "ws"
     default is 1.25 MB. The bench records whether a run was limited by its window.
 - **Reset.** A reset sends `Reset`, then closes the channel. The reader discards what it holds and fails with
   `ConnectionReset`.
-  - A channel's close fails a stream the peer has not finished, but only after 3 s. webrtc-rs can announce a close
-    before the messages that precede it, and a close that failed the stream at once would discard the peer's last
-    bytes.
+  - A channel the peer closes fails a stream the peer has not finished, at once. The peer closes only after the
+    `Closed` exchange, so the channel has carried everything the stream needs.
 
 ### Backends
 
@@ -727,12 +735,12 @@ Not in the trial:
 
 ## Risks
 
-- **webrtc-rs can lose a stream's last messages.** Found by the bench. A channel's close, when processed, drops the
-  messages still queued on that channel. Two measures follow. Closes wait 200 ms after the last byte is acknowledged
-  or buffered. A stream the peer has not finished fails only 3 s after its channel closes, which covers SCTP's 1 s
-  minimum retransmission timeout. Before the drain, sequential streams on one native loopback link failed after about
-  40 to 75 of them; with it, 200 sequential streams passed in 6 of 6 runs (`many_streams.rs`). That is loopback
-  evidence only, and the 3 s also delays a refused link's streams. Report the cause upstream.
+- **webrtc-rs can lose a stream's last messages, and reuse a stream id too soon.** Found by the bench. A channel's close,
+  when processed, drops the messages still queued on that channel, so a channel closes only after the `Closed` exchange
+  (Channels). Its SCTP stream id is freed at once, and the peer's reset for it can close a new channel that takes the id,
+  so the opener waits for the acknowledgement before opening another. Before the handshake, sequential streams on one
+  native loopback link failed after about 40 to 75 of them; with it, `many_streams.rs` passes. That is loopback evidence
+  only. Report both causes upstream.
 - **Our own protocol.**
   - The Noise pattern, the ML-KEM secret in the PSK slot and the nonce layout are ours to get right. The primitives
     come from snow and RustCrypto, not from us.
