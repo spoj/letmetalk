@@ -251,9 +251,11 @@ impl WsSignal {  // feature "ws"
     start (SCTP's INIT) and the DCEP open then each waited up to 200 ms, and ICE's responses waited too. The wake is
     `set_configuration` with the configuration already in place, the cheapest driver event webrtc-rs offers. Cold setup
     on native loopback fell from about 606 ms to about 60 ms.
-  - On native, letmetalk lists interfaces itself (`netdev`) and binds only up, physical ones, skipping docker, veth and
-    bridges, one socket per address (IPv6 link-local excluded). With no such address, it binds loopback, so peers on
-    one machine still connect. webrtc-rs's interface filter is stored but never read.
+  - On native, letmetalk lists interfaces itself (`netdev`) and binds every one that is up, except loopback, one socket
+    per address (IPv6 link-local excluded). A host's way out can be a bridge, a VPN tunnel, a container's veth or a
+    cloud VM's NIC with a virtual MAC; a filter to physical interfaces left such hosts with loopback only. With no
+    such address, it binds loopback, so peers on one machine still connect. webrtc-rs's interface filter is stored but
+    never read.
   - The accepter:
     - drops anything it cannot open;
     - applies `admit`, and a refusal gets no reply;
