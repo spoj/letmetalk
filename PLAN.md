@@ -564,8 +564,8 @@ Pairs and baselines:
   - coturn runs the repo's member and stranger configs, each with two listening addresses: the second is the RFC 5780
     alternate. `bps-capacity` is 125000000, as deployed, since coturn 4.6 refuses every allocation when it equals
     `max-bps`. iroh-relay serves plain HTTP on 443.
-  - Profiles shape each peer's access link in both directions (netem on egress, `ifb0` for ingress). `lan` is
-    unshaped. `wan` adds 12.5 ms and 0.5% loss per link, so two peers see 50 ms RTT and about 1% loss; the servers are
+  - Profiles shape each peer's access link in both directions (netem on egress, `ifb0` for ingress), after the NAT
+    probes, so loss cannot change what a probe reports. `lan` is unshaped. `wan` adds 12.5 ms and 0.5% loss per link, so two peers see 50 ms RTT and about 1% loss; the servers are
     unshaped. `constrained` is netem at 10 Mbit/s with a 5000-packet queue, about 6 s deep.
   - The NAT probe is `turnutils_natdiscovery -m -f` against the member coturn, run from the peer behind its NAT. Each
     label must probe as: `none` and `eif`, endpoint-independent mapping and filtering; `pr`, endpoint-independent

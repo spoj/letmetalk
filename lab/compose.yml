@@ -1,6 +1,6 @@
 # The lab: an internet network with the trial's servers, a router per NAT'd slot, and peers behind them.
-# Peers in slot a run behind router-a, and so on. NAT_A, NAT_B and NAT_H pick each router's NAT, and
-# PROFILE the shaping. run.sh sets them per pair. With NAT none the router is not started: the slot's peers
+# Peers in slot a run behind router-a, and so on. NAT_A, NAT_B and NAT_H pick each router's NAT; run.sh sets them
+# per pair. With NAT none the router is not started: the slot's peers
 # join the internet network directly, with a public address.
 x-build: &build
   context: ..
@@ -114,7 +114,6 @@ services:
     environment: &env-a
       NAT: "${NAT_A:-none}"
       GATEWAY: 10.20.1.254
-      PROFILE: "${PROFILE:-lan}"
       MULTICAST: "${MULTICAST:-}"
     networks:
       internet: { ipv4_address: 203.0.113.41 }
@@ -154,7 +153,6 @@ services:
     environment: &env-b
       NAT: "${NAT_B:-none}"
       GATEWAY: 10.20.2.254
-      PROFILE: "${PROFILE:-lan}"
       MULTICAST: "${MULTICAST:-}"
     networks:
       internet: { ipv4_address: 203.0.113.45 }
@@ -176,7 +174,6 @@ services:
     environment: &env-h1
       NAT: "${NAT_H:-none}"
       GATEWAY: 10.20.3.254
-      PROFILE: "${PROFILE:-lan}"
       MULTICAST: "${MULTICAST:-}"
     networks:
       internet: { ipv4_address: 203.0.113.47 }
@@ -198,7 +195,6 @@ services:
     environment: &env-h2
       NAT: "${NAT_H:-none}"
       GATEWAY: 10.20.4.254
-      PROFILE: "${PROFILE:-lan}"
       MULTICAST: "${MULTICAST:-}"
     networks:
       internet: { ipv4_address: 203.0.113.49 }

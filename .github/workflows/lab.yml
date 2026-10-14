@@ -1,0 +1,23 @@
+name: Lab
+
+on:
+  workflow_dispatch:
+
+jobs:
+  lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo modprobe sch_netem ifb
+      - run: docker compose -f lab/compose.yml build && docker run --rm --entrypoint turnserver letmetalk-lab/coturn --version
+      - run: lab/run.sh
+        env:
+          COMPOSE: docker compose
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lab-results
+          path: |
+            lab/results
+            trial/2-lab.md
