@@ -1,0 +1,13 @@
+{"pair":"native-native","scenario":"env","run":2,"loadavg_start":"3.66 3.44 3.21","rmem_max":4194304}
+{"pair":"native-native","scenario":"cold","median_ms":605.703135,"samples_ms":[605.703135,605.519822,604.7793350000001,606.022725,606.116612]}
+{"pair":"native-native","scenario":"warm","median_ms":0.18154,"samples_ms":[0.244508,0.15019100000000002,0.199995,0.221996,0.18504700000000002,0.24422799999999997,0.235381,0.195406,0.163817,0.142046,0.18154,0.150101,0.198061,0.177653,0.15568099999999999,0.198953,0.173545,0.160731,0.17115000000000002,0.155912]}
+{"pair":"native-native","scenario":"path","route":{"local":"host","relayed":false,"remote":"host","rtt_ms":0.048229999999999995}}
+{"pair":"native-native","scenario":"bulk_up","bytes":268435456,"mb_s":172.00212748011867,"secs":1.560651952}
+{"pair":"native-native","scenario":"bulk_down","bytes":268435456,"mb_s":168.79551827661078,"secs":1.590299664}
+{"pair":"native-native","scenario":"bulk_4x64","bytes":268435456,"mb_s":192.81217238246467,"secs":1.392212186}
+{"pair":"native-native","scenario":"latency_idle","n":1000,"p50_ms":0.134242,"p95_ms":0.170589,"p99_ms":0.19970400000000002}
+{"pair":"native-native","scenario":"latency_load","bulk_mb_s":172.10563291345886,"echo":{"n":1000,"p50_ms":2.8570029999999997,"p95_ms":7.289086999999999,"p99_ms":9.989817}}
+{"pair":"native-native","scenario":"crypto","block_bytes":16384,"open_mb_s":2012.044049405012,"seal_mb_s":2009.3143017491184}
+{"pair":"native-native","peak_rss_kib":48300,"scenario":"rss"}
+{"pair":"native-native","scenario":"serve_rss","peak_rss_kib":32056}
+{"pair":"native-native","scenario":"env","run":2,"loadavg_end":"3.59 3.44 3.21"}

@@ -1,0 +1,13 @@
+{"pair":"iroh-relay","scenario":"env","run":1,"loadavg_start":"2.94 3.30 3.16","rmem_max":4194304}
+{"pair":"iroh-relay","scenario":"cold","median_ms":2.370992,"samples_ms":[3.164609,2.370992,2.3850379999999998,2.2038689999999996,2.119701]}
+{"pair":"iroh-relay","scenario":"warm","median_ms":0.10066800000000001,"samples_ms":[0.20295,0.108954,0.105537,0.10066800000000001,0.088446,0.102522,0.10138,0.098033,0.109856,0.113483,0.094787,0.07998000000000001,0.10815300000000001,0.092794,0.090028,0.09715199999999999,0.080862,0.08676199999999999,0.080982,0.11102799999999999]}
+{"pair":"iroh-relay","scenario":"path","route":{"local":"Relay(RelayUrl(\"http://127.0.0.1:18792/\"))","relayed":true,"remote":"relay:http://127.0.0.1:18792/","rtt_ms":0.33310700000000004}}
+{"pair":"iroh-relay","scenario":"bulk_up","bytes":268435456,"mb_s":128.0865431540586,"secs":2.095735035}
+{"pair":"iroh-relay","scenario":"bulk_down","bytes":268435456,"mb_s":149.36493876232095,"secs":1.797178496}
+{"pair":"iroh-relay","scenario":"bulk_4x64","bytes":268435456,"mb_s":154.35137365962908,"secs":1.73911932}
+{"pair":"iroh-relay","scenario":"latency_idle","n":1000,"p50_ms":0.164248,"p95_ms":0.214783,"p99_ms":0.27059700000000003}
+{"pair":"iroh-relay","scenario":"latency_load","bulk_mb_s":126.65715595076345,"echo":{"n":1000,"p50_ms":4.039117,"p95_ms":5.050090999999999,"p99_ms":5.4964569999999995}}
+{"pair":"iroh-relay","scenario":"crypto","block_bytes":16384,"open_mb_s":2008.2293646785092,"seal_mb_s":2004.2685906471872}
+{"pair":"iroh-relay","peak_rss_kib":28992,"scenario":"rss"}
+{"pair":"iroh-relay","scenario":"serve_rss","peak_rss_kib":29592}
+{"pair":"iroh-relay","scenario":"env","run":1,"loadavg_end":"3.66 3.44 3.21"}
