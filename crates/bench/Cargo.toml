@@ -16,7 +16,6 @@ default = ["iroh"]
 iroh = ["dep:iroh", "dep:iroh-relay"]
 
 [dependencies]
-chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
 futures = "0.3"
 hex = "0.4"
 letmetalk = { path = "../letmetalk", features = ["ws", "stats"] }

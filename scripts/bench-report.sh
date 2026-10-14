@@ -18,7 +18,7 @@ RUNS=$(ls "$OUT" | grep -c '^native-native-.*jsonl$')
   done
   echo "- \`net.core.rmem_max\`: $(sysctl -n net.core.rmem_max) bytes."
   echo "- Chromium $("${CHROME:-/opt/google/chrome/chrome}" --version 2>/dev/null)"
-  echo "- Crates: $(for c in webrtc snow chacha20poly1305 iroh; do awk -v c="$c" '$0 == "name = \"" c "\"" {getline; print c " " $3}' Cargo.lock; done | tr -d '"' | paste -sd, - | sed 's/,/, /g')."
+  echo "- Crates: $(for c in webrtc snow iroh; do awk -v c="$c" '$0 == "name = \"" c "\"" {getline; print c " " $3}' Cargo.lock; done | tr -d '"' | paste -sd, - | sed 's/,/, /g')."
   echo "- wasm: \`letmetalk_bench.wasm\` is $(stat -c %s target/wasm32-unknown-unknown/release/letmetalk_bench.wasm) bytes;"
   echo "  wasm-bindgen's output $(stat -c %s "$WEB/pkg/letmetalk_bench_bg.wasm") bytes, $(gzip -9c "$WEB/pkg/letmetalk_bench_bg.wasm" | wc -c) gzipped."
   echo

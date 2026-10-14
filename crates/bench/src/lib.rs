@@ -36,7 +36,6 @@ const WARM: usize = 20;
 const LATENCY: usize = 1000;
 const ECHO_BYTES: usize = 100;
 const PACING: std::time::Duration = std::time::Duration::from_millis(5);
-const CRYPTO_BLOCK: usize = 16 << 10;
 
 /// The route of a link: each side's candidate type or address, and whether it is relayed.
 #[derive(Serialize)]
@@ -245,7 +244,6 @@ pub async fn dial_all<D: Dialer>(dialer: &D, pair: &str, sink: &dyn Fn(String)) 
     out.line("latency_load", serde_json::json!({ "bulk_mb_s": mb_per_s(sent, secs), "echo": latency(&loaded) }));
     dialer.close(link).await;
 
-    out.line("crypto", crypto());
     Ok(())
 }
 
@@ -261,38 +259,6 @@ fn latency(rtts: &[f64]) -> serde_json::Value {
         "p50_ms": percentile(&sorted, 0.50),
         "p95_ms": percentile(&sorted, 0.95),
         "p99_ms": percentile(&sorted, 0.99),
-    })
-}
-
-/// Seals and opens 16 KiB messages with ChaCha20-Poly1305, the AEAD snow uses, for about a second each.
-fn crypto() -> serde_json::Value {
-    use chacha20poly1305::aead::{Aead, KeyInit};
-    use chacha20poly1305::ChaCha20Poly1305;
-
-    let cipher = ChaCha20Poly1305::new(&[9; 32].into());
-    let plain = vec![5; CRYPTO_BLOCK];
-    let mut nonce = [0; 12];
-    let start = Instant::now();
-    let mut sealed = 0;
-    while start.elapsed().as_secs_f64() < 1.0 {
-        nonce[..8].copy_from_slice(&(sealed as u64).to_le_bytes());
-        cipher.encrypt(&nonce.into(), plain.as_slice()).expect("16 KiB seals");
-        sealed += 1;
-    }
-    let seal_secs = start.elapsed().as_secs_f64();
-
-    let ciphertext = cipher.encrypt(&[0; 12].into(), plain.as_slice()).expect("16 KiB seals");
-    let start = Instant::now();
-    let mut opened = 0;
-    while start.elapsed().as_secs_f64() < 1.0 {
-        cipher.decrypt(&[0; 12].into(), ciphertext.as_slice()).expect("the ciphertext opens");
-        opened += 1;
-    }
-    let open_secs = start.elapsed().as_secs_f64();
-    serde_json::json!({
-        "block_bytes": CRYPTO_BLOCK,
-        "seal_mb_s": mb_per_s(sealed * CRYPTO_BLOCK, seal_secs),
-        "open_mb_s": mb_per_s(opened * CRYPTO_BLOCK, open_secs),
     })
 }
 

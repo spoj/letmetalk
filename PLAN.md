@@ -395,7 +395,7 @@ impl WsSignal {  // feature "ws"
     channel, report events, and close the link.
   - The stream layer's tests also run over a fake backend at this seam.
 - **Browser: the browser's own WebRTC,** through web-sys (`RtcPeerConnection`, `RtcDataChannel`).
-  - The browser runs ICE, DTLS and SCTP. letmetalk adds the handshake, encryption, flow control and link management.
+  - The browser runs ICE, DTLS and SCTP. letmetalk adds the handshake, flow control and link management.
   - Browsers expose `RTCPeerConnection` in windows, not in workers. letmeknow's node already runs in the window.
   - The peer connection gets the carrier's ICE servers, and `iceTransportPolicy: relay` for Relayed keys. Candidates
     go in with mid `0` and index 0, as on native.
@@ -640,7 +640,6 @@ direct and relay-only). Decisions:
   - 256 MiB up and down on one stream, and 4 × 64 MiB up at once. Throughput is decimal MB/s, timed until the peer's
     acknowledgement.
   - 1,000 100-byte echoes, paced 5 ms apart, idle and then while a sink takes 64 KiB chunks on another stream.
-  - 1 s of ChaCha20-Poly1305 sealing and opening 16 KiB blocks.
 - **One link per measurement.** Each measurement gets a link of its own, formed by an echo before it starts, so that
   setup is not in its timing.
 - **Peak RSS.** Each native process reports its own `VmHWM`; a server's is read before the harness stops it. Browsers
@@ -650,10 +649,6 @@ direct and relay-only). Decisions:
 - **Browser.** The page prints its lines into `#out` and sets `#status` to `done` or `failed`. Playwright reads them. The
   `.wasm` is recorded as wasm-bindgen writes it, raw and gzipped. Nothing shrinks it with `wasm-opt`, so the number is
   the untuned build.
-- **Encryption.** chacha20poly1305 0.10.1 with the default features off, which is the version and feature set snow
-  uses. The bench times the crate directly, as a reference only: letmetalk no longer seals stream data, so this cost is
-  on no path.
-
 ### Decision
 
 The criteria:
@@ -736,7 +731,6 @@ Each step lands with its tests and keeps the checks in AGENTS.md green.
    - a plain `ws://` to a remote host is refused.
 5. **Bench** (`crates/bench`): a native binary and a browser page. They:
    - echo, time setup, and measure bulk throughput and latency under load;
-   - micro-benchmark the encryption;
    - cover the iroh baselines.
 6. **Lab:** the Compose setup, its runner and the manual workflow.
 7. **Real-world runs, `TRIAL.md` and the decision.**
@@ -758,7 +752,6 @@ Not in the trial:
   exchange that letmetalk can require, or once letmetalk carries its own stream keys again.
 - **Post-quantum first messages.** These would need each peer's ML-KEM key in advance, and a key here is only Ed25519.
 - **Credit windows that grow** with the path's bandwidth-delay product.
-- **Spare channels,** opened ahead of time, so that native opens cost no round trip either.
 - **TURN over TCP and TLS for webrtc-rs:** upstream, if not there by adoption.
 - **Stream I/O in a worker.** `RTCDataChannel` can be transferred to dedicated workers: Chrome 130, Firefox 144,
   Safari 15.

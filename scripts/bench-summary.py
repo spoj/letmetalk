@@ -27,9 +27,6 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.jsonl"))):
         values = runs[pair][run]
         if scenario == "path":
             routes[pair][run] = record["route"]
-        elif scenario == "crypto":
-            values[("crypto", "seal")] = record["seal_mb_s"]
-            values[("crypto", "open")] = record["open_mb_s"]
         elif scenario in ("cold", "warm"):
             values[(scenario, "ms")] = record["median_ms"]
         elif scenario in ("bulk_up", "bulk_down", "bulk_4x64"):
@@ -83,8 +80,6 @@ rows = [
     ("Echo p50 / p95 / p99 idle, ms", lambda p: " / ".join(cell(p, ("idle", k), "{:.2f}") for k in ("p50", "p95", "p99"))),
     ("Echo p50 / p95 / p99 under bulk, ms", lambda p: " / ".join(cell(p, ("loaded", k), "{:.2f}") for k in ("p50", "p95", "p99"))),
     ("Bulk MB/s while echoing", lambda p: cell(p, ("bulk_under_echo", "mb_s"), spread=True)),
-    ("Seal 16 KiB, MB/s", lambda p: cell(p, ("crypto", "seal"), "{:.0f}")),
-    ("Open 16 KiB, MB/s", lambda p: cell(p, ("crypto", "open"), "{:.0f}")),
     ("Peak RSS dialer, MiB", lambda p: cell(p, ("rss", "dial"), "{:.1f}")),
     ("Peak RSS server, MiB", lambda p: cell(p, ("rss", "serve"), "{:.1f}")),
 ]
