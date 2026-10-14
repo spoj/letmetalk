@@ -27,7 +27,6 @@ use webrtc::peer_connection::{
 use crate::IceServer;
 use crate::backend::{Event, Peer};
 
-const SEND_BUFFER: usize = 1 << 20;
 const SOCKET_BUFFER: usize = 4 << 20;
 
 /// webrtc-rs binds its UDP sockets with the OS's default buffers, which drop packets under bulk load. This runtime
@@ -201,7 +200,6 @@ pub(crate) fn peer(ice: &[IceServer], relay_only: bool) -> BoxFuture<'static, io
             .with_handler(Arc::new(Handler(shared.clone())))
             .with_runtime(Arc::new(Buffers(default_runtime().expect("webrtc-rs has a tokio runtime"))))
             .with_udp_addrs(bind_addrs())
-            .with_data_channel_send_buffer_limit(SEND_BUFFER)
             .build()
             .await
             .map_err(other)?;
