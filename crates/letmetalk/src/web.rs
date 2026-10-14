@@ -32,9 +32,7 @@ use web_sys::{
 use crate::IceServer;
 #[cfg(feature = "stats")]
 use crate::backend::Path;
-use crate::backend::{Event, Peer};
-
-const CONTROL: u32 = 0;
+use crate::backend::{CHANNELS, Event, Peer};
 
 pub(crate) fn js(e: JsValue) -> io::Error {
     io::Error::other(format!("{e:?}"))
@@ -102,7 +100,7 @@ fn attach(events: &UnboundedSender<Event>, lanes: &Lanes, n: u32, dc: RtcDataCha
     });
     let tx = events.clone();
     let closed = Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| {
-        let _ = tx.unbounded_send(Event::Closed(n));
+        let _ = tx.unbounded_send(Event::Closed);
     });
     dc.set_onopen(Some(open.as_ref().unchecked_ref()));
     dc.set_onmessage(Some(message.as_ref().unchecked_ref()));
@@ -156,14 +154,6 @@ impl Inner {
         let lane = lanes.get(&n).ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no such channel"))?;
         lane.dc.send_with_u8_array(data).map_err(js)
     }
-
-    /// Closes channel `n` and drops its handlers. Its close event does not reach the queue. `close` flushes what
-    /// was sent.
-    fn close_lane(&self, n: u32) {
-        if let Some(lane) = self.lanes.borrow_mut().remove(&n) {
-            lane.dc.close();
-        }
-    }
 }
 
 pub(crate) struct Web {
@@ -198,7 +188,7 @@ impl Web {
         let channel = Closure::<dyn FnMut(RtcDataChannelEvent)>::new(move |event: RtcDataChannelEvent| {
             let dc = event.channel();
             let Ok(n) = dc.label().parse::<u32>() else {
-                dc.close();
+                let _ = tx.unbounded_send(Event::Failed);
                 return;
             };
             attach(&tx, &channels, n, dc);
@@ -240,7 +230,9 @@ pub(crate) fn peer(ice: &[IceServer], relay_only: bool) -> BoxFuture<'static, io
 impl Peer for Web {
     fn offer(&self) -> BoxFuture<'_, io::Result<String>> {
         Box::pin(async move {
-            self.inner.create(CONTROL);
+            for channel in 0..CHANNELS {
+                self.inner.create(channel);
+            }
             let sdp = sdp_of(settle(self.inner.pc.create_offer()).await?);
             settle(self.inner.set_local(RtcSdpType::Offer, &sdp)).await?;
             Ok(sdp)
@@ -266,22 +258,9 @@ impl Peer for Web {
         Box::pin(async move { settle(self.inner.add_candidate(&candidate)).await.map(drop) })
     }
 
-    fn open(&self, channel: u32) -> BoxFuture<'_, io::Result<()>> {
-        Box::pin(async move {
-            self.inner.create(channel);
-            Ok(())
-        })
-    }
-
     fn send(&self, channel: u32, data: Vec<u8>) -> BoxFuture<'_, io::Result<()>> {
         Box::pin(async move {
             self.inner.write(channel, &data)
-        })
-    }
-
-    fn close_channel(&self, channel: u32) -> BoxFuture<'_, ()> {
-        Box::pin(async move {
-            self.inner.close_lane(channel);
         })
     }
 
@@ -290,13 +269,7 @@ impl Peer for Web {
     }
 
     fn next(&self) -> BoxFuture<'_, Option<Event>> {
-        Box::pin(async {
-            let event = self.events.lock().await.next().await?;
-            if let Event::Closed(n) = event {
-                self.inner.lanes.borrow_mut().remove(&n);
-            }
-            Some(event)
-        })
+        Box::pin(async { self.events.lock().await.next().await })
     }
 
     /// Browsers fire no event when a peer connection is closed, so `Failed` is synthesized: it wakes a run loop that
@@ -380,9 +353,8 @@ mod tests {
         let a = Web::new(&configuration(&[], false)).unwrap();
         let b = Web::new(&configuration(&[], false)).unwrap();
         connect(&a, &b).await;
-        a.open(5).await.unwrap();
-        next_matching(&a, |e| matches!(e, Event::Ready(5))).await;
-        a.inner.lanes.borrow()[&5].dc.send_with_str("text").unwrap();
+        next_matching(&a, |e| matches!(e, Event::Ready(1))).await;
+        a.inner.lanes.borrow()[&1].dc.send_with_str("text").unwrap();
         let next = next_matching(&b, |e| matches!(e, Event::Failed | Event::Message(..)));
         let event = timeout(Duration::from_secs(10), next).await.expect("an event within 10 s");
         assert!(matches!(event, Event::Failed));

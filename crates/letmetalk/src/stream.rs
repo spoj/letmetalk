@@ -4,12 +4,10 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 
-use futures::channel::mpsc::UnboundedSender;
-use futures::channel::oneshot;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::keys::PublicKey;
-use crate::mux::{CHUNK, FIRST_CREDIT, Mux, Plain, reset};
+use crate::mux::{CHUNK, FIRST_CREDIT, Mux, data_frame, reset};
 
 pub(crate) struct Io {
     pub(crate) number: u32,
@@ -18,25 +16,19 @@ pub(crate) struct Io {
 }
 
 pub(crate) struct IoState {
-    pub(crate) opened: bool,
     pub(crate) accepted: bool,
     pub(crate) inbox: VecDeque<u8>,
     pub(crate) read: usize,
     pub(crate) granted: usize,
     pub(crate) received: usize,
-    pub(crate) recv_index: u64,
     pub(crate) credit: usize,
-    pub(crate) queued_finish: bool,
+    pub(crate) outbox: VecDeque<Vec<u8>>,
     pub(crate) local_finished: bool,
     pub(crate) remote_finished: bool,
-    pub(crate) local_closed: bool,
-    pub(crate) remote_closed: bool,
     pub(crate) failed: bool,
     pub(crate) discard: bool,
     pub(crate) read_waker: Option<Waker>,
     pub(crate) write_waker: Option<Waker>,
-    pub(crate) outbox: UnboundedSender<Plain>,
-    pub(crate) ready: Option<oneshot::Sender<()>>,
 }
 
 impl IoState {
@@ -46,35 +38,24 @@ impl IoState {
 }
 
 impl Io {
-    pub(crate) fn new(
-        number: u32,
-        own: bool,
-        ready: Option<oneshot::Sender<()>>,
-        outbox: UnboundedSender<Plain>,
-    ) -> Io {
+    pub(crate) fn new(number: u32, own: bool) -> Io {
         Io {
             number,
             own,
             state: Mutex::new(IoState {
-                opened: own,
                 accepted: own,
                 inbox: VecDeque::new(),
                 read: 0,
                 granted: FIRST_CREDIT,
                 received: 0,
-                recv_index: 0,
                 credit: FIRST_CREDIT,
-                queued_finish: false,
+                outbox: VecDeque::new(),
                 local_finished: false,
                 remote_finished: false,
-                local_closed: false,
-                remote_closed: false,
                 failed: false,
                 discard: false,
                 read_waker: None,
                 write_waker: None,
-                outbox,
-                ready,
             }),
         }
     }
@@ -155,7 +136,7 @@ impl AsyncWrite for Stream {
         if s.failed {
             return Poll::Ready(Err(reset()));
         }
-        if s.queued_finish {
+        if s.local_finished {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "stream shut down")));
         }
         if s.credit == 0 {
@@ -164,9 +145,8 @@ impl AsyncWrite for Stream {
         }
         let n = buf.len().min(s.credit).min(CHUNK);
         s.credit -= n;
-        if s.outbox.unbounded_send(Plain::Data(buf[..n].to_vec())).is_err() {
-            return Poll::Ready(Err(reset()));
-        }
+        drop(s);
+        self.mux.push(&self.io, data_frame(self.io.number, &buf[..n]));
         Poll::Ready(Ok(n))
     }
 
@@ -179,9 +159,10 @@ impl AsyncWrite for Stream {
         if s.failed {
             return Poll::Ready(Err(reset()));
         }
-        if !s.queued_finish {
-            s.queued_finish = true;
-            let _ = s.outbox.unbounded_send(Plain::Finish);
+        if !s.local_finished {
+            s.local_finished = true;
+            drop(s);
+            self.mux.finish(&self.io);
         }
         Poll::Ready(Ok(()))
     }

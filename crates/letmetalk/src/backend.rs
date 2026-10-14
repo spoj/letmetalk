@@ -21,7 +21,12 @@ impl Path {
     }
 }
 
-/// What a peer connection reports. Channels are numbered by letmetalk; channel 0 is the control channel.
+/// Channel 0 is the control channel, and channels 1 to `LANES` are the lanes. The dialer creates them all before its
+/// offer, labelled by their numbers.
+pub(crate) const LANES: u32 = 4;
+pub(crate) const CHANNELS: u32 = LANES + 1;
+
+/// What a peer connection reports. `Ready` is a channel this side created, `Opened` one the peer created.
 pub(crate) enum Event {
     Candidate(String),
     Connected,
@@ -30,21 +35,18 @@ pub(crate) enum Event {
     Ready(u32),
     Opened(u32),
     Message(u32, Vec<u8>),
-    Closed(u32),
+    Closed,
 }
 
 /// One WebRTC peer connection: the native webrtc-rs backend, the browser's own, or the in-memory fake.
 pub(crate) trait Peer: Send + Sync {
-    /// Creates the control channel and returns the offer, with candidates arriving as events.
+    /// Creates the control channel and the lanes, and returns the offer, with candidates arriving as events.
     fn offer(&self) -> BoxFuture<'_, io::Result<String>>;
     /// Applies an offer and returns the answer.
     fn answer(&self, offer: &str) -> BoxFuture<'_, io::Result<String>>;
     fn accept(&self, answer: &str) -> BoxFuture<'_, io::Result<()>>;
     fn candidate(&self, candidate: String) -> BoxFuture<'_, io::Result<()>>;
-    /// Creates a channel. It reports `Ready` once it is open.
-    fn open(&self, channel: u32) -> BoxFuture<'_, io::Result<()>>;
     fn send(&self, channel: u32, data: Vec<u8>) -> BoxFuture<'_, io::Result<()>>;
-    fn close_channel(&self, channel: u32) -> BoxFuture<'_, ()>;
     /// The next event; None once the connection is gone.
     fn next(&self) -> BoxFuture<'_, Option<Event>>;
     fn close(&self) -> BoxFuture<'_, ()>;

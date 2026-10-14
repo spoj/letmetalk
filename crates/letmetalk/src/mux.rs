@@ -1,106 +1,83 @@
-//! The stream layer over one peer connection: numbers, sealing, messages and credit.
+//! The stream layer over one peer connection: the control channel, the lanes, numbers, frames and credit.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::poll_fn;
 use std::io;
 use std::sync::{Arc, Mutex};
-use std::task::{Poll, Waker};
+use std::task::{Context, Poll, Waker};
 
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use futures::channel::oneshot;
 use n0_future::task::spawn;
 
-use crate::backend::{Event, Peer};
+use crate::backend::{CHANNELS, Event, LANES, Peer};
 use crate::handshake::Transport;
 use crate::keys::PublicKey;
 use crate::stream::{Io, IoState, Stream};
 
-pub(crate) const CONTROL: u32 = 0;
-const LAST: u32 = (1 << 24) - 1;
-const WINDOW: u32 = 1024;
 pub(crate) const CHUNK: usize = 16 * 1024;
 pub(crate) const FIRST_CREDIT: usize = 16 * 1024;
 pub(crate) const ACCEPTED_CREDIT: usize = 1 << 20;
+const WINDOW: u64 = 1024;
 const MAX_STREAMS: usize = 128;
 const MAX_WAITING: usize = 16;
 const MAX_PROTOCOL: usize = 255;
 
-pub(crate) enum Plain {
-    Open(String),
-    Data(Vec<u8>),
-    Finish,
-    Hello,
-    Credit(u32, u32),
-    Reset(u32),
-    Closed(u32),
+const OPEN: u8 = 1;
+const DATA: u8 = 2;
+const FINISH: u8 = 3;
+const RESET: u8 = 4;
+const CREDIT: u8 = 5;
+
+/// The lane that carries stream `n`.
+fn lane_of(n: u32) -> u32 {
+    1 + n % LANES
 }
 
-impl Plain {
-    fn encode(&self) -> Vec<u8> {
-        match self {
-            Plain::Open(protocol) => [&[1][..], protocol.as_bytes()].concat(),
-            Plain::Data(data) => [&[2][..], data].concat(),
-            Plain::Finish => vec![3],
-            Plain::Hello => vec![4],
-            Plain::Credit(n, bytes) => [&[5][..], &n.to_be_bytes(), &bytes.to_be_bytes()].concat(),
-            Plain::Reset(n) => [&[6][..], &n.to_be_bytes()].concat(),
-            Plain::Closed(n) => [&[7][..], &n.to_be_bytes()].concat(),
-        }
-    }
-
-    fn decode(mut bytes: Vec<u8>) -> io::Result<Plain> {
-        let bad = || io::Error::other("bad message");
-        let kind = *bytes.first().ok_or_else(bad)?;
-        Ok(match (kind, bytes.len()) {
-            (1, 1..=256) => Plain::Open(String::from_utf8(bytes[1..].to_vec()).map_err(io::Error::other)?),
-            (2, _) => {
-                bytes.drain(..1);
-                Plain::Data(bytes)
-            }
-            (3, 1) => Plain::Finish,
-            (4, 1) => Plain::Hello,
-            (5, 9) => Plain::Credit(be32(&bytes[1..5]), be32(&bytes[5..9])),
-            (6, 5) => Plain::Reset(be32(&bytes[1..5])),
-            (7, 5) => Plain::Closed(be32(&bytes[1..5])),
-            _ => return Err(bad()),
-        })
-    }
+fn frame(kind: u8, n: u32, body: &[u8]) -> Vec<u8> {
+    [&[kind][..], &n.to_be_bytes(), body].concat()
 }
 
-fn be32(bytes: &[u8]) -> u32 {
-    u32::from_be_bytes(bytes.try_into().expect("four bytes"))
+pub(crate) fn data_frame(n: u32, body: &[u8]) -> Vec<u8> {
+    frame(DATA, n, body)
+}
+
+fn unframe(bytes: &[u8]) -> io::Result<(u8, u32, &[u8])> {
+    if bytes.len() < 5 {
+        return Err(io::Error::other("short frame"));
+    }
+    let n = u32::from_be_bytes(bytes[1..5].try_into().expect("four bytes"));
+    Ok((bytes[0], n, &bytes[5..]))
 }
 
 pub(crate) fn reset() -> io::Error {
     io::Error::new(io::ErrorKind::ConnectionReset, "stream reset")
 }
 
-fn wake_waiters(st: &mut State) {
-    for waker in st.release_waiters.drain(..) {
-        waker.wake();
-    }
-}
-
-/// The stream numbers a peer has opened. Each must have the peer's parity and be new, within a window of
-/// 1,024 below the highest one seen.
+/// The stream numbers the peer has opened. Each must have the peer's parity and be new, within a window of
+/// 1,024 below the highest one seen. Opens on different lanes can arrive out of order, so the window is needed.
 #[derive(Default)]
 struct Numbers {
-    highest: u32,
+    highest: u64,
     seen: BTreeSet<u32>,
 }
 
 impl Numbers {
     fn admit(&mut self, number: u32, parity: u32) -> io::Result<()> {
-        if number == CONTROL || number >= LAST || number % 2 != parity {
-            return Err(io::Error::other("bad stream number"));
+        if number % 2 != parity {
+            return Err(io::Error::other("stream number of our parity"));
         }
-        if number + WINDOW <= self.highest || !self.seen.insert(number) {
+        if u64::from(number) + WINDOW <= self.highest || !self.seen.insert(number) {
             return Err(io::Error::other("stream number reused"));
         }
-        self.highest = self.highest.max(number);
-        self.seen.retain(|&n| n + WINDOW > self.highest);
+        self.highest = self.highest.max(u64::from(number));
+        self.seen.retain(|&n| u64::from(n) + WINDOW > self.highest);
         Ok(())
+    }
+
+    /// Whether `number` is in the window and was never opened.
+    fn unseen(&self, number: u32) -> bool {
+        u64::from(number) + WINDOW > self.highest && !self.seen.contains(&number)
     }
 }
 
@@ -109,61 +86,79 @@ pub(crate) enum Incoming {
     Stream(Stream),
 }
 
+#[derive(Default)]
+struct Lane {
+    ready: VecDeque<Arc<Io>>,
+    waker: Option<Waker>,
+}
+
 struct State {
     streams: HashMap<u32, Arc<Io>>,
     numbers: Numbers,
-    next: u32,
-    control_index: u64,
-    control_open: bool,
+    next: u64,
+    channels: BTreeSet<u32>,
+    hello_sent: bool,
+    hello_seen: bool,
+    lanes: [Lane; LANES as usize],
     dead: bool,
-    own_channels: BTreeSet<u32>,
-    releasing: BTreeSet<u32>,
-    release_waiters: Vec<Waker>,
+}
+
+impl State {
+    /// Queues a frame on the stream's outbox. A stream with frames waiting is in its lane's ready queue, so its
+    /// lane sends one frame from each waiting stream in turn.
+    fn queue(&mut self, io: &Arc<Io>, bytes: Vec<u8>) {
+        let was_empty = {
+            let mut s = io.state();
+            let empty = s.outbox.is_empty();
+            s.outbox.push_back(bytes);
+            empty
+        };
+        if was_empty {
+            let lane = &mut self.lanes[lane_of(io.number) as usize - 1];
+            lane.ready.push_back(io.clone());
+            if let Some(waker) = lane.waker.take() {
+                waker.wake();
+            }
+        }
+    }
+}
+
+/// Ends a stream once both sides have sent their Finish. Its handles keep what they hold.
+fn settle(st: &mut State, n: u32) {
+    let done = st.streams.get(&n).is_some_and(|io| {
+        let s = io.state();
+        s.local_finished && s.remote_finished
+    });
+    if done {
+        st.streams.remove(&n);
+    }
 }
 
 pub(crate) struct Mux {
     peer: Arc<dyn Peer>,
-    transport: Arc<Transport>,
+    transport: Transport,
     pub(crate) remote: PublicKey,
     dialer: bool,
     budget: usize,
-    control: UnboundedSender<Plain>,
+    control: UnboundedSender<Vec<u8>>,
     state: Mutex<State>,
 }
 
-/// Sends control messages in order. One that cannot be sent fails the link, as does an index past 2^40.
-async fn control_loop(peer: Arc<dyn Peer>, transport: Arc<Transport>, mut rx: UnboundedReceiver<Plain>) {
-    let mut index = 0;
-    while let Some(plain) = rx.next().await {
-        let sealed = transport.seal(index, &plain.encode()).expect("messages fit the cipher");
-        let full = index >> 40 != 0;
-        index += 1;
-        if full || peer.send(CONTROL, sealed).await.is_err() {
+/// Sends control messages in order. One that cannot be sent fails the link.
+async fn control_loop(peer: Arc<dyn Peer>, mut rx: UnboundedReceiver<Vec<u8>>) {
+    while let Some(bytes) = rx.next().await {
+        if peer.send(0, bytes).await.is_err() {
             peer.close().await;
             return;
         }
     }
 }
 
-async fn send_loop(mux: Arc<Mux>, number: u32, start: oneshot::Receiver<()>, mut outbox: UnboundedReceiver<Plain>) {
-    if start.await.is_err() {
-        return;
-    }
-    let mut index = 0u64;
-    while let Some(plain) = outbox.next().await {
-        let finish = matches!(plain, Plain::Finish);
-        let nonce = (number as u64) << 40 | index;
-        let full = index >> 40 != 0;
-        index += 1;
-        let sealed = mux.transport.seal(nonce, &plain.encode()).expect("messages fit the cipher");
-        if full || mux.peer.send(number, sealed).await.is_err() {
-            let mut st = mux.state.lock().unwrap();
-            mux.fail(&mut st, number, true);
-            mux.close_later(&mut st, number);
+async fn lane_loop(mux: Arc<Mux>, channel: u32) {
+    while let Some(bytes) = poll_fn(|cx| mux.next_frame(channel, cx)).await {
+        if mux.peer.send(channel, bytes).await.is_err() {
+            mux.peer.close().await;
             return;
-        }
-        if finish {
-            mux.finished(&mut mux.state.lock().unwrap(), number, true);
         }
     }
 }
@@ -177,10 +172,8 @@ impl Mux {
         budget: usize,
     ) -> Arc<Mux> {
         let (control, rx) = unbounded();
-        let transport = Arc::new(transport);
-        spawn(control_loop(peer.clone(), transport.clone(), rx));
-        Arc::new(Mux {
-            peer,
+        let mux = Arc::new(Mux {
+            peer: peer.clone(),
             transport,
             remote,
             dialer,
@@ -189,15 +182,19 @@ impl Mux {
             state: Mutex::new(State {
                 streams: HashMap::new(),
                 numbers: Numbers::default(),
-                next: if dialer { 2 } else { 1 },
-                control_index: 0,
-                control_open: false,
+                next: u64::from(!dialer),
+                channels: BTreeSet::new(),
+                hello_sent: false,
+                hello_seen: false,
+                lanes: Default::default(),
                 dead: false,
-                own_channels: BTreeSet::new(),
-                releasing: BTreeSet::new(),
-                release_waiters: Vec::new(),
             }),
-        })
+        });
+        spawn(control_loop(peer, rx));
+        for channel in 1..CHANNELS {
+            spawn(lane_loop(mux.clone(), channel));
+        }
+        mux
     }
 
     pub(crate) fn transport(&self) -> &Transport {
@@ -213,331 +210,193 @@ impl Mux {
         self.state.lock().unwrap().streams.len()
     }
 
-    pub(crate) async fn open(self: &Arc<Self>, protocol: &str) -> io::Result<Stream> {
+    /// The next frame of a lane, from the streams waiting on it in turn.
+    fn next_frame(&self, channel: u32, cx: &mut Context<'_>) -> Poll<Option<Vec<u8>>> {
+        let mut st = self.state.lock().unwrap();
+        if st.dead {
+            return Poll::Ready(None);
+        }
+        let lane = &mut st.lanes[channel as usize - 1];
+        let Some(io) = lane.ready.pop_front() else {
+            lane.waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        };
+        let mut s = io.state();
+        let bytes = s.outbox.pop_front().expect("a ready stream has a frame");
+        let more = !s.outbox.is_empty();
+        drop(s);
+        if more {
+            lane.ready.push_back(io);
+        }
+        Poll::Ready(Some(bytes))
+    }
+
+    pub(crate) fn open(self: &Arc<Self>, protocol: &str) -> io::Result<Stream> {
         if protocol.len() > MAX_PROTOCOL {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "protocol name longer than 255 bytes"));
         }
-        self.released().await?;
-        let (number, io) = {
-            let mut st = self.state.lock().unwrap();
-            if st.dead {
-                return Err(reset());
-            }
-            let own = st.streams.values().filter(|io| io.own()).count();
-            if own >= MAX_STREAMS || st.next >= LAST {
-                return Err(io::Error::new(io::ErrorKind::ResourceBusy, "no stream slot free"));
-            }
-            let number = st.next;
-            st.next += 2;
-            let (ready, start) = oneshot::channel();
-            let (outbox, rx) = unbounded();
-            let io = Arc::new(Io::new(number, true, Some(ready), outbox));
-            io.state().outbox.unbounded_send(Plain::Open(protocol.to_string())).expect("fresh outbox");
-            st.streams.insert(number, io.clone());
-            st.own_channels.insert(number);
-            spawn(send_loop(self.clone(), number, start, rx));
-            self.grant(&mut st);
-            (number, io)
-        };
-        if let Err(e) = self.peer.open(number).await {
-            self.fail_stream(number, false);
-            return Err(e);
+        let mut st = self.state.lock().unwrap();
+        if st.dead {
+            return Err(reset());
         }
+        let own = st.streams.values().filter(|io| io.own()).count();
+        if own >= MAX_STREAMS || st.next > u64::from(u32::MAX) {
+            return Err(io::Error::new(io::ErrorKind::ResourceBusy, "no stream slot free"));
+        }
+        let number = st.next as u32;
+        st.next += 2;
+        let io = Arc::new(Io::new(number, true));
+        st.streams.insert(number, io.clone());
+        st.queue(&io, frame(OPEN, number, protocol.as_bytes()));
+        self.grant(&mut st);
         Ok(Stream::new(self.clone(), io, protocol.to_string()))
     }
 
     /// Handles one event of the peer connection that concerns streams or the control channel.
     pub(crate) fn handle(self: &Arc<Self>, event: Event) -> io::Result<Option<Incoming>> {
         match event {
-            Event::Ready(CONTROL) if self.dialer => {
-                self.send_control(Plain::Hello)?;
-                Ok(None)
-            }
-            Event::Opened(CONTROL) if !self.dialer => {
-                if std::mem::replace(&mut self.state.lock().unwrap().control_open, true) {
-                    return Err(io::Error::other("control channel opened twice"));
-                }
-                self.send_control(Plain::Hello)?;
-                Ok(None)
-            }
-            Event::Opened(CONTROL) => Err(io::Error::other("the dialer's control channel opened")),
-            Event::Ready(n) => {
-                self.ready(n);
-                Ok(None)
-            }
-            Event::Opened(n) => {
-                self.opened(n)?;
-                Ok(None)
-            }
-            Event::Message(CONTROL, data) => self.control_message(data),
-            Event::Message(n, data) => self.stream_message(n, data),
-            Event::Closed(CONTROL) => Err(reset()),
-            Event::Closed(n) => {
-                self.closed(n);
-                Ok(None)
-            }
+            Event::Ready(channel) if self.dialer => self.channel_open(channel),
+            Event::Opened(channel) if !self.dialer => self.channel_open(channel),
+            Event::Opened(_) => Err(io::Error::other("the dialer's channel opened")),
+            // The accepter's own channels are the ones the peer opened, so their readiness is not awaited.
+            Event::Ready(_) => Ok(None),
+            Event::Message(0, data) => self.control_message(data),
+            Event::Message(channel, data) => self.lane_message(channel, data),
+            Event::Closed => Err(reset()),
             _ => Ok(None),
         }
     }
 
-    fn send_control(&self, plain: Plain) -> io::Result<()> {
-        self.control.unbounded_send(plain).map_err(|_| reset())
-    }
-
-    fn ready(&self, n: u32) {
-        let st = self.state.lock().unwrap();
-        if let Some(ready) = st.streams.get(&n).and_then(|io| io.state().ready.take()) {
-            let _ = ready.send(());
-        }
-    }
-
-    fn opened(self: &Arc<Self>, n: u32) -> io::Result<()> {
+    /// Once all channels are open, sends this side's Hello. The link is confirmed once both Hellos are through, so
+    /// each side has every channel open before the other sends on one.
+    fn channel_open(&self, channel: u32) -> io::Result<Option<Incoming>> {
         let mut st = self.state.lock().unwrap();
-        st.numbers.admit(n, u32::from(self.dialer))?;
-        let peers = st.streams.values().filter(|io| !io.own()).count();
-        if peers >= MAX_STREAMS {
-            self.send_control(Plain::Reset(n))?;
-            return Ok(());
+        if channel >= CHANNELS || !st.channels.insert(channel) {
+            return Err(io::Error::other("unknown or repeated channel"));
         }
-        let (outbox, rx) = unbounded();
-        let io = Arc::new(Io::new(n, false, None, outbox));
-        st.streams.insert(n, io);
-        let (started, start) = oneshot::channel();
-        let _ = started.send(());
-        spawn(send_loop(self.clone(), n, start, rx));
-        Ok(())
-    }
-
-    fn control_message(self: &Arc<Self>, data: Vec<u8>) -> io::Result<Option<Incoming>> {
-        let mut st = self.state.lock().unwrap();
-        let index = st.control_index;
-        st.control_index += 1;
-        let plain = self.transport.open(index, &data).and_then(Plain::decode)?;
-        match plain {
-            Plain::Hello => Ok(Some(Incoming::Hello)),
-            Plain::Credit(n, bytes) => {
-                if let Some(io) = st.streams.get(&n).cloned() {
-                    let mut s = io.state();
-                    if s.credit + bytes as usize > ACCEPTED_CREDIT {
-                        return Err(io::Error::other("credit past the window"));
-                    }
-                    s.credit += bytes as usize;
-                    if let Some(waker) = s.write_waker.take() {
-                        waker.wake();
-                    }
-                }
-                Ok(None)
-            }
-            Plain::Reset(n) => {
-                if n == CONTROL {
-                    return Err(io::Error::other("reset of the control channel"));
-                }
-                self.fail(&mut st, n, false);
-                self.close_later(&mut st, n);
-                Ok(None)
-            }
-            Plain::Closed(n) => {
-                match st.streams.get(&n).cloned() {
-                    Some(io) => {
-                        io.state().remote_closed = true;
-                        self.settle(&mut st, n);
-                    }
-                    None => {
-                        if st.releasing.remove(&n) {
-                            wake_waiters(&mut st);
-                        }
-                    }
-                }
-                Ok(None)
-            }
-            _ => Err(io::Error::other("bad control message")),
-        }
-    }
-
-    fn stream_message(self: &Arc<Self>, n: u32, data: Vec<u8>) -> io::Result<Option<Incoming>> {
-        let mut st = self.state.lock().unwrap();
-        let Some(io) = st.streams.get(&n).cloned() else {
+        if st.channels.len() < CHANNELS as usize {
             return Ok(None);
-        };
-        let opened = {
-            let mut s = io.state();
-            let nonce = (n as u64) << 40 | s.recv_index;
-            s.recv_index += 1;
-            self.transport.open(nonce, &data).and_then(Plain::decode).map(|plain| (plain, s.opened))
-        };
-        let (plain, was_open) = match opened {
-            Ok(pair) => pair,
-            Err(_) => {
-                self.fail(&mut st, n, true);
-                self.close_later(&mut st, n);
-                return Ok(None);
-            }
-        };
-        match plain {
-            Plain::Open(protocol) => {
-                if was_open {
-                    return Err(io::Error::other("stream opened twice"));
-                }
-                let waiting = st
-                    .streams
-                    .values()
-                    .filter(|io| !io.own() && io.state().opened && !io.state().accepted)
-                    .count();
-                if waiting >= MAX_WAITING {
-                    self.fail(&mut st, n, true);
-                    self.close_later(&mut st, n);
-                    return Ok(None);
-                }
-                io.state().opened = true;
-                Ok(Some(Incoming::Stream(Stream::new(self.clone(), io, protocol))))
-            }
-            _ if !was_open => Err(io::Error::other("data before open")),
-            Plain::Data(bytes) => {
-                let mut s = io.state();
-                if s.remote_finished {
-                    return Err(io::Error::other("data after finish"));
-                }
-                if s.received + bytes.len() > s.granted {
-                    return Err(io::Error::other("sent past its credit"));
-                }
-                s.received += bytes.len();
-                if s.discard {
-                    s.read += bytes.len();
-                    drop(s);
-                    self.grant(&mut st);
-                    return Ok(None);
-                }
-                s.inbox.extend(bytes);
-                if let Some(waker) = s.read_waker.take() {
-                    waker.wake();
-                }
-                Ok(None)
-            }
-            Plain::Finish => {
-                self.finished(&mut st, n, false);
-                Ok(None)
-            }
-            _ => Err(io::Error::other("bad stream message")),
         }
+        st.hello_sent = true;
+        let hello = self.transport.seal(0, &[])?;
+        self.control.unbounded_send(hello).map_err(|_| reset())?;
+        Ok(st.hello_seen.then_some(Incoming::Hello))
     }
 
-    /// The peer closed a channel this side did not open. Its stream is done, or fails; either way the close is
-    /// acknowledged, so that the opener may reuse the channel's number. A channel this side opened is closed by its
-    /// own hand, and its close needs nothing.
-    fn closed(&self, n: u32) {
-        if self.opened_here(n) {
-            return;
-        }
+    fn control_message(&self, data: Vec<u8>) -> io::Result<Option<Incoming>> {
         let mut st = self.state.lock().unwrap();
-        let done = st.streams.get(&n).is_none_or(|io| {
-            let s = io.state();
-            s.remote_finished && s.local_closed
-        });
-        if done {
-            st.streams.remove(&n);
-        } else {
-            self.fail(&mut st, n, false);
+        if !st.hello_seen {
+            self.transport.open(0, &data)?;
+            st.hello_seen = true;
+            return Ok(st.hello_sent.then_some(Incoming::Hello));
         }
-        let _ = self.send_control(Plain::Closed(n));
-    }
-
-    fn opened_here(&self, n: u32) -> bool {
-        n % 2 == u32::from(!self.dialer)
-    }
-
-    /// Records that this side sent (`local`) or received its `Finish`, and settles the close.
-    fn finished(&self, st: &mut State, n: u32, local: bool) {
-        let Some(io) = st.streams.get(&n).cloned() else {
-            return;
-        };
-        {
+        let (kind, n, body) = unframe(&data)?;
+        if kind != CREDIT {
+            return Err(io::Error::other("bad control message"));
+        }
+        let bytes: [u8; 4] = body.try_into().map_err(io::Error::other)?;
+        if let Some(io) = self.lookup(&st, n)? {
             let mut s = io.state();
-            if local {
-                s.local_finished = true;
-            } else {
-                s.remote_finished = true;
+            let bytes = u32::from_be_bytes(bytes) as usize;
+            if s.credit + bytes > ACCEPTED_CREDIT {
+                return Err(io::Error::other("credit past the window"));
             }
-            if let Some(waker) = s.read_waker.take() {
+            s.credit += bytes;
+            if let Some(waker) = s.write_waker.take() {
                 waker.wake();
             }
         }
-        self.settle(st, n);
+        Ok(None)
     }
 
-    /// Once both finishes are known, sends `Closed`. Once it is sent and the peer's is received, the channel closes.
-    /// Each side has then read all the other sent, since each sent `Closed` only after the other's `Finish`.
-    fn settle(&self, st: &mut State, n: u32) {
-        let Some(io) = st.streams.get(&n).cloned() else {
-            return;
+    fn lane_message(self: &Arc<Self>, channel: u32, data: Vec<u8>) -> io::Result<Option<Incoming>> {
+        let (kind, n, body) = unframe(&data)?;
+        let valid = match kind {
+            OPEN => body.len() <= MAX_PROTOCOL,
+            DATA => body.len() <= CHUNK,
+            FINISH | RESET => body.is_empty(),
+            _ => false,
         };
-        let (send, close) = {
-            let mut s = io.state();
-            let send = s.local_finished && s.remote_finished && !s.local_closed;
-            if send {
-                s.local_closed = true;
-            }
-            (send, s.local_closed && s.remote_closed)
+        if !valid || lane_of(n) != channel {
+            return Err(io::Error::other("bad lane frame"));
+        }
+        let mut st = self.state.lock().unwrap();
+        if kind == OPEN {
+            return self.open_from_peer(&mut st, n, body);
+        }
+        let Some(io) = self.lookup(&st, n)? else {
+            return Ok(None);
         };
-        if send {
-            let _ = self.send_control(Plain::Closed(n));
-        }
-        if close {
-            st.streams.remove(&n);
-            self.close_later(st, n);
-        }
-    }
-
-    /// Removes a stream and fails its app-side handle. The channel is left as it is.
-    fn fail(&self, st: &mut State, n: u32, notify: bool) {
-        if let Some(io) = st.streams.remove(&n) {
-            io.fail();
-        }
-        if notify {
-            let _ = self.send_control(Plain::Reset(n));
-        }
-    }
-
-    pub(crate) fn fail_stream(&self, n: u32, notify: bool) {
-        let mut st = self.state.lock().unwrap();
-        self.fail(&mut st, n, notify);
-    }
-
-    /// Ends the link: every stream fails, and the state drops its streams.
-    pub(crate) fn kill(&self) {
-        let mut st = self.state.lock().unwrap();
-        st.dead = true;
-        for (_, io) in st.streams.drain() {
-            io.fail();
-        }
-        wake_waiters(&mut st);
-    }
-
-    /// Closes the channel of stream `n`, if this side opened it. Until the peer acknowledges the close, the number
-    /// is in `releasing`, and `released` holds this side's new streams.
-    fn close_later(&self, st: &mut State, n: u32) {
-        if st.own_channels.remove(&n) {
-            st.releasing.insert(n);
-            let peer = self.peer.clone();
-            spawn(async move { peer.close_channel(n).await });
-        }
-    }
-
-    /// Waits until the peer has acknowledged every channel this side closed. webrtc-rs frees a closed channel's SCTP
-    /// stream id at once, but the peer's reset for it can arrive later and close a new channel that took the id. The
-    /// acknowledgement comes after that reset has been processed.
-    async fn released(&self) -> io::Result<()> {
-        poll_fn(|cx| {
-            let mut st = self.state.lock().unwrap();
-            if st.dead {
-                Poll::Ready(Err(reset()))
-            } else if st.releasing.is_empty() {
-                Poll::Ready(Ok(()))
-            } else {
-                st.release_waiters.push(cx.waker().clone());
-                Poll::Pending
+        match kind {
+            DATA => self.received(&mut st, &io, body)?,
+            FINISH => {
+                {
+                    let mut s = io.state();
+                    s.remote_finished = true;
+                    if let Some(waker) = s.read_waker.take() {
+                        waker.wake();
+                    }
+                }
+                settle(&mut st, n);
             }
-        })
-        .await
+            _ => {
+                st.streams.remove(&n);
+                io.fail();
+            }
+        }
+        Ok(None)
+    }
+
+    /// The stream of a frame: live, or ended (`None`, which ignores the frame). A number never opened fails the
+    /// link. Ours are opened in order, and the peer's are judged by the window.
+    fn lookup(&self, st: &State, n: u32) -> io::Result<Option<Arc<Io>>> {
+        if let Some(io) = st.streams.get(&n) {
+            return Ok(Some(io.clone()));
+        }
+        let ours = n % 2 != u32::from(self.dialer);
+        let unseen = if ours { u64::from(n) >= st.next } else { st.numbers.unseen(n) };
+        if unseen {
+            Err(io::Error::other("frame for a stream never opened"))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn open_from_peer(self: &Arc<Self>, st: &mut State, n: u32, body: &[u8]) -> io::Result<Option<Incoming>> {
+        let protocol = String::from_utf8(body.to_vec()).map_err(io::Error::other)?;
+        st.numbers.admit(n, u32::from(self.dialer))?;
+        let peers = st.streams.values().filter(|io| !io.own()).count();
+        let waiting = st.streams.values().filter(|io| !io.own() && !io.state().accepted).count();
+        if peers >= MAX_STREAMS || waiting >= MAX_WAITING {
+            let refused = Arc::new(Io::new(n, false));
+            st.queue(&refused, frame(RESET, n, &[]));
+            return Ok(None);
+        }
+        let io = Arc::new(Io::new(n, false));
+        st.streams.insert(n, io.clone());
+        Ok(Some(Incoming::Stream(Stream::new(self.clone(), io, protocol))))
+    }
+
+    fn received(&self, st: &mut State, io: &Arc<Io>, body: &[u8]) -> io::Result<()> {
+        let mut s = io.state();
+        if s.remote_finished {
+            return Err(io::Error::other("data after finish"));
+        }
+        if s.received + body.len() > s.granted {
+            return Err(io::Error::other("sent past its credit"));
+        }
+        s.received += body.len();
+        if s.discard {
+            s.read += body.len();
+            drop(s);
+            self.grant(st);
+            return Ok(());
+        }
+        s.inbox.extend(body);
+        if let Some(waker) = s.read_waker.take() {
+            waker.wake();
+        }
+        Ok(())
     }
 
     /// Grants credit to each stream. Each keeps its first 16 KiB outside the budget; above that, streams share what
@@ -548,7 +407,9 @@ impl Mux {
         let mut free = self.budget.saturating_sub(used);
         for (&n, io) in &st.streams {
             let mut s = io.state();
-            if s.failed || s.remote_finished {
+            // Control and lanes are not ordered against each other, so a grant must not outrun the Open of a stream
+            // this side opened. The peer's first frame on it shows that the Open arrived.
+            if s.failed || s.remote_finished || (io.own() && s.received == 0) {
                 continue;
             }
             let want = if s.accepted { ACCEPTED_CREDIT } else { FIRST_CREDIT };
@@ -561,9 +422,21 @@ impl Mux {
             let grant = floor + extra;
             if grant > 0 {
                 s.granted += grant;
-                let _ = self.control.unbounded_send(Plain::Credit(n, grant as u32));
+                let _ = self.control.unbounded_send(frame(CREDIT, n, &(grant as u32).to_be_bytes()));
             }
         }
+    }
+
+    /// Queues a frame of a stream on its lane.
+    pub(crate) fn push(&self, io: &Arc<Io>, bytes: Vec<u8>) {
+        self.state.lock().unwrap().queue(io, bytes);
+    }
+
+    /// Queues the stream's Finish, and ends the stream if the peer's has come.
+    pub(crate) fn finish(&self, io: &Arc<Io>) {
+        let mut st = self.state.lock().unwrap();
+        st.queue(io, frame(FINISH, io.number, &[]));
+        settle(&mut st, io.number);
     }
 
     /// Called when the app reads from a stream.
@@ -581,14 +454,13 @@ impl Mux {
     }
 
     /// Called when a stream's handle drops. A stream that has shut down keeps discarding what the peer still sends,
-    /// so the peer can finish, and its channel closes through the close handshake. Any other stream is reset.
+    /// so the peer can finish. Any other stream is reset.
     pub(crate) fn dropped(&self, n: u32) {
         let mut st = self.state.lock().unwrap();
         let Some(io) = st.streams.get(&n).cloned() else {
             return;
         };
-        let shut = io.state().queued_finish;
-        if shut {
+        if io.state().local_finished {
             {
                 let mut s = io.state();
                 s.discard = true;
@@ -597,8 +469,23 @@ impl Mux {
             }
             self.grant(&mut st);
         } else {
-            self.fail(&mut st, n, true);
-            self.close_later(&mut st, n);
+            st.streams.remove(&n);
+            st.queue(&io, frame(RESET, n, &[]));
+        }
+    }
+
+    /// Ends the link: every stream fails, and the lanes stop.
+    pub(crate) fn kill(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.dead = true;
+        for (_, io) in st.streams.drain() {
+            io.fail();
+        }
+        for lane in st.lanes.iter_mut() {
+            lane.ready.clear();
+            if let Some(waker) = lane.waker.take() {
+                waker.wake();
+            }
         }
     }
 }
@@ -608,10 +495,12 @@ mod tests {
     use std::time::Duration;
 
     use futures::StreamExt;
+    use futures::channel::oneshot;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::fake;
+    use crate::backend::Peer;
+    use crate::fake::{self, Fake};
     use crate::handshake::{Dialer, Offer, Replay};
     use crate::keys::SecretKey;
 
@@ -637,75 +526,90 @@ mod tests {
         (dialed, accepter)
     }
 
-    /// Feeds one side's events to its mux. Accepted streams come out of the receiver. An error ends the task.
+    /// Feeds one side's events to its mux. Accepted streams come out of the receiver, and the Hello that confirms
+    /// the link is reported once. An error ends the task.
     fn serve(
         mux: Arc<Mux>,
         peer: Arc<dyn Peer>,
-    ) -> (UnboundedReceiver<Stream>, n0_future::task::JoinHandle<io::Result<()>>) {
+    ) -> (UnboundedReceiver<Stream>, oneshot::Receiver<()>, n0_future::task::JoinHandle<io::Result<()>>) {
         let (tx, rx) = unbounded();
+        let (confirmed, hello) = oneshot::channel();
         let task = spawn(async move {
+            let mut confirmed = Some(confirmed);
             while let Some(event) = peer.next().await {
-                if let Some(Incoming::Stream(stream)) = mux.handle(event)? {
-                    let _ = tx.unbounded_send(stream);
+                match mux.handle(event)? {
+                    Some(Incoming::Stream(stream)) => {
+                        let _ = tx.unbounded_send(stream);
+                    }
+                    Some(Incoming::Hello) => {
+                        if let Some(confirmed) = confirmed.take() {
+                            let _ = confirmed.send(());
+                        }
+                    }
+                    None => {}
                 }
             }
             Ok(())
         });
-        (rx, task)
+        (rx, hello, task)
     }
 
-    /// A dialer mux (A) and an accepter mux (B) over a fake pair. Both sides are served.
+    /// A dialer mux (A) and an accepter mux (B) over a fake pair, with all channels open. Both sides are served.
     struct Pair {
         a: Arc<Mux>,
         b: Arc<Mux>,
-        a_peer: Arc<dyn Peer>,
-        b_peer: Arc<dyn Peer>,
+        a_peer: Arc<Fake>,
+        b_peer: Arc<Fake>,
         accepts: UnboundedReceiver<Stream>,
         a_task: n0_future::task::JoinHandle<io::Result<()>>,
         b_task: n0_future::task::JoinHandle<io::Result<()>>,
     }
 
-    fn pair() -> Pair {
-        pair_with(BUDGET)
+    /// A confirmed link: both Hellos have passed, so streams may open.
+    async fn pair() -> Pair {
+        pair_with(BUDGET).await
     }
 
-    fn pair_with(budget: usize) -> Pair {
+    async fn pair_with(budget: usize) -> Pair {
         let (ta, tb) = transports();
         let (pa, pb) = fake::pair();
         let a = Mux::new(pa.clone(), ta, SecretKey::generate().public(), true, budget);
         let b = Mux::new(pb.clone(), tb, SecretKey::generate().public(), false, budget);
-        let (_, a_task) = serve(a.clone(), pa.clone());
-        let (accepts, b_task) = serve(b.clone(), pb.clone());
+        let (_, a_hello, a_task) = serve(a.clone(), pa.clone());
+        let (accepts, b_hello, b_task) = serve(b.clone(), pb.clone());
+        a_hello.await.unwrap();
+        b_hello.await.unwrap();
         Pair { a, b, a_peer: pa, b_peer: pb, accepts, a_task, b_task }
     }
 
-    /// Sends a message on stream `n` from A as the dialer would, sealed at `index`.
-    async fn send_raw(p: &Pair, n: u32, index: u64, plain: Plain) {
-        let sealed = p.a.transport.seal((n as u64) << 40 | index, &plain.encode()).unwrap();
-        p.a_peer.send(n, sealed).await.unwrap();
+    /// Sends a frame from A on `channel`, as the dialer's peer connection would.
+    async fn send_raw(p: &Pair, channel: u32, bytes: Vec<u8>) {
+        p.a_peer.send(channel, bytes).await.unwrap();
+    }
+
+    /// Sends a frame from B on `channel`.
+    async fn send_back(p: &Pair, channel: u32, bytes: Vec<u8>) {
+        p.b_peer.send(channel, bytes).await.unwrap();
     }
 
     #[test]
     fn numbers_need_the_peers_parity_and_must_be_new() {
         let mut numbers = Numbers::default();
-        assert!(numbers.admit(CONTROL, 0).is_err());
         assert!(numbers.admit(3, 0).is_err());
-        assert!(numbers.admit(LAST, 1).is_err());
-        assert!(numbers.admit(LAST + 1, 0).is_err());
-        assert!(numbers.admit(u32::MAX - 1, 0).is_err());
+        assert!(numbers.admit(u32::MAX, 0).is_err());
         numbers.admit(2, 0).unwrap();
         assert!(numbers.admit(2, 0).is_err());
-        numbers.admit(2 + 2 * WINDOW, 0).unwrap();
+        numbers.admit(2 + 2 * WINDOW as u32, 0).unwrap();
         assert!(numbers.admit(2, 0).is_err());
         assert!(numbers.admit(4, 0).is_err());
-        assert!(numbers.admit(2 + WINDOW, 0).is_err());
-        numbers.admit(2 + 2 * WINDOW - 2, 0).unwrap();
+        assert!(numbers.admit(2 + WINDOW as u32, 0).is_err());
+        numbers.admit(2 + 2 * WINDOW as u32 - 2, 0).unwrap();
     }
 
     #[tokio::test]
     async fn echo_and_finish_both_ways() {
-        let p = pair();
-        let mut a = p.a.open("echo").await.unwrap();
+        let p = pair().await;
+        let mut a = p.a.open("echo").unwrap();
         let mut accepts = p.accepts;
         let mut b = accepts.next().await.unwrap();
         b.accept();
@@ -728,8 +632,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_leaves_the_link_once_both_sides_finish() {
-        let mut p = pair();
-        let mut a = p.a.open("echo").await.unwrap();
+        let mut p = pair().await;
+        let mut a = p.a.open("echo").unwrap();
         let mut b = p.accepts.next().await.unwrap();
         b.accept();
         a.shutdown().await.unwrap();
@@ -742,148 +646,150 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn channel_closed_before_finish_fails_the_stream_at_once() {
-        let mut p = pair();
-        let _a = p.a.open("raw").await.unwrap();
-        let mut b = p.accepts.next().await.unwrap();
-        b.accept();
-        p.a_peer.close_channel(2).await;
-        let mut buf = [0; 1];
-        let read = n0_future::time::timeout(Duration::from_millis(100), b.read(&mut buf)).await;
-        assert_eq!(read.expect("fails within 100 ms").unwrap_err().kind(), io::ErrorKind::ConnectionReset);
-    }
-
-    #[tokio::test]
-    async fn replayed_message_fails_its_stream() {
-        let mut p = pair();
-        let _a = p.a.open("raw").await.unwrap();
-        let mut b = p.accepts.next().await.unwrap();
-        b.accept();
-        let sealed = p.a.transport.seal(2 << 40 | 1, &Plain::Data(b"one".to_vec()).encode()).unwrap();
-        p.a_peer.send(2, sealed.clone()).await.unwrap();
-        let mut buf = [0; 3];
-        b.read_exact(&mut buf).await.unwrap();
-        p.a_peer.send(2, sealed).await.unwrap();
-        assert_eq!(b.read(&mut buf).await.unwrap_err().kind(), io::ErrorKind::ConnectionReset);
-    }
-
-    #[tokio::test]
-    async fn reordered_message_fails_its_stream() {
-        let mut p = pair();
-        let _a = p.a.open("raw").await.unwrap();
-        let mut b = p.accepts.next().await.unwrap();
-        b.accept();
-        send_raw(&p, 2, 2, Plain::Data(b"two".to_vec())).await;
-        send_raw(&p, 2, 1, Plain::Data(b"one".to_vec())).await;
-        let mut buf = [0; 3];
-        assert_eq!(b.read(&mut buf).await.unwrap_err().kind(), io::ErrorKind::ConnectionReset);
-    }
-
-    #[tokio::test]
-    async fn dropped_message_fails_its_stream() {
-        let mut p = pair();
-        let _a = p.a.open("raw").await.unwrap();
-        let mut b = p.accepts.next().await.unwrap();
-        b.accept();
-        send_raw(&p, 2, 2, Plain::Data(b"two".to_vec())).await;
-        let mut buf = [0; 3];
-        assert_eq!(b.read(&mut buf).await.unwrap_err().kind(), io::ErrorKind::ConnectionReset);
-    }
-
-    #[tokio::test]
-    async fn moved_message_fails_its_stream() {
-        let mut p = pair();
-        let _a = p.a.open("first").await.unwrap();
-        let _c = p.a.open("second").await.unwrap();
-        let mut first = p.accepts.next().await.unwrap();
-        let mut second = p.accepts.next().await.unwrap();
-        first.accept();
-        second.accept();
-        let sealed = p.a.transport.seal(2 << 40 | 1, &Plain::Data(b"one".to_vec()).encode()).unwrap();
-        p.a_peer.send(4, sealed).await.unwrap();
-        let mut buf = [0; 3];
-        assert_eq!(second.read(&mut buf).await.unwrap_err().kind(), io::ErrorKind::ConnectionReset);
-        let quiet = n0_future::time::timeout(Duration::from_millis(100), first.read(&mut buf)).await;
-        assert!(quiet.is_err());
-    }
-
-    #[tokio::test]
     async fn opening_a_used_number_fails_the_link() {
-        let mut p = pair();
-        let _a = p.a.open("used").await.unwrap();
-        let _b = p.accepts.next().await.unwrap();
-        p.a_peer.open(2).await.unwrap();
+        let p = pair().await;
+        let _a = p.a.open("used").unwrap();
+        send_raw(&p, lane_of(0), frame(OPEN, 0, b"used")).await;
         assert!(p.b_task.await.unwrap().is_err());
     }
 
     #[tokio::test]
     async fn opening_a_number_of_our_parity_fails_the_link() {
-        let p = pair();
-        p.a_peer.open(3).await.unwrap();
+        let p = pair().await;
+        send_raw(&p, lane_of(1), frame(OPEN, 1, b"odd")).await;
         assert!(p.b_task.await.unwrap().is_err());
     }
 
     #[tokio::test]
-    async fn opening_a_number_past_the_range_fails_the_link() {
-        for number in [(1 << 24) + 2, u32::MAX - 1] {
-            let p = pair();
-            p.a_peer.open(number).await.unwrap();
-            assert!(p.b_task.await.unwrap().is_err());
-        }
-        let p = pair();
-        p.b_peer.open(LAST).await.unwrap();
-        assert!(p.a_task.await.unwrap().is_err());
+    async fn opens_arriving_out_of_order_across_lanes_are_all_accepted() {
+        let mut p = pair().await;
+        send_raw(&p, lane_of(4), frame(OPEN, 4, b"four")).await;
+        send_raw(&p, lane_of(2), frame(OPEN, 2, b"two")).await;
+        let four = p.accepts.next().await.unwrap();
+        let mut two = p.accepts.next().await.unwrap();
+        assert_eq!((four.protocol(), two.protocol()), ("four", "two"));
+        four.accept();
+        two.accept();
+        send_raw(&p, lane_of(2), frame(DATA, 2, b"hi")).await;
+        let mut buf = [0; 2];
+        two.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hi");
     }
 
     #[tokio::test]
-    async fn opening_the_control_channel_twice_fails_the_link() {
-        let p = pair();
-        p.a_peer.open(CONTROL).await.unwrap();
-        p.a_peer.open(CONTROL).await.unwrap();
+    async fn frame_for_an_unseen_number_that_is_not_an_open_fails_the_link() {
+        let p = pair().await;
+        send_raw(&p, lane_of(6), frame(DATA, 6, b"x")).await;
         assert!(p.b_task.await.unwrap().is_err());
     }
 
     #[tokio::test]
-    async fn sending_past_credit_fails_the_link() {
-        let mut p = pair();
-        let _a = p.a.open("greedy").await.unwrap();
-        let _b = p.accepts.next().await.unwrap();
-        send_raw(&p, 2, 1, Plain::Data(vec![0; FIRST_CREDIT + 1])).await;
+    async fn frame_on_the_wrong_lane_fails_the_link() {
+        let p = pair().await;
+        send_raw(&p, lane_of(0), frame(OPEN, 2, b"two")).await;
         assert!(p.b_task.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn repeated_lane_label_fails_the_link() {
+        let p = pair().await;
+        p.a_peer.tell(Event::Opened(1));
+        assert!(p.b_task.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn unknown_lane_label_fails_the_link() {
+        let p = pair().await;
+        p.a_peer.tell(Event::Opened(CHANNELS));
+        assert!(p.b_task.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn credit_for_an_ended_stream_is_ignored() {
+        let mut p = pair().await;
+        let mut a = p.a.open("echo").unwrap();
+        let mut b = p.accepts.next().await.unwrap();
+        b.accept();
+        a.shutdown().await.unwrap();
+        let mut rest = Vec::new();
+        b.read_to_end(&mut rest).await.unwrap();
+        b.shutdown().await.unwrap();
+        a.read_to_end(&mut rest).await.unwrap();
+        send_raw(&p, 0, frame(CREDIT, 0, &5u32.to_be_bytes())).await;
+        n0_future::time::sleep(Duration::from_millis(50)).await;
+        assert!(!p.b_task.is_finished());
     }
 
     #[tokio::test]
     async fn data_after_finish_fails_the_link() {
-        let mut p = pair();
-        let _a = p.a.open("raw").await.unwrap();
+        let mut p = pair().await;
+        let _a = p.a.open("raw").unwrap();
         let b = p.accepts.next().await.unwrap();
         b.accept();
-        send_raw(&p, 2, 1, Plain::Finish).await;
-        send_raw(&p, 2, 2, Plain::Data(b"late".to_vec())).await;
+        send_raw(&p, lane_of(0), frame(FINISH, 0, &[])).await;
+        send_raw(&p, lane_of(0), frame(DATA, 0, b"late")).await;
         assert!(p.b_task.await.unwrap().is_err());
     }
 
     #[tokio::test]
-    async fn reset_of_the_control_channel_fails_the_link() {
-        let p = pair();
-        let sealed = p.a.transport.seal(0, &Plain::Reset(CONTROL).encode()).unwrap();
-        p.a_peer.send(CONTROL, sealed).await.unwrap();
+    async fn a_lane_frame_on_the_control_channel_fails_the_link() {
+        let p = pair().await;
+        send_raw(&p, 0, frame(DATA, 0, b"x")).await;
+        assert!(p.b_task.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn hello_from_another_session_fails_the_link() {
+        let (_, tb) = transports();
+        let (other, _) = transports();
+        let (pa, pb) = fake::pair();
+        let b = Mux::new(pb.clone(), tb, SecretKey::generate().public(), false, BUDGET);
+        let (_, _, b_task) = serve(b, pb.clone());
+        pa.send(0, other.seal(0, &[]).unwrap()).await.unwrap();
+        assert!(b_task.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn hello_sealed_under_the_wrong_nonce_fails_the_link() {
+        let (ta, tb) = transports();
+        let (pa, pb) = fake::pair();
+        let b = Mux::new(pb.clone(), tb, SecretKey::generate().public(), false, BUDGET);
+        let (_, _, b_task) = serve(b, pb.clone());
+        let hello = ta.seal(1, &[]).unwrap();
+        pa.send(0, hello).await.unwrap();
+        assert!(b_task.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn hello_reflected_from_the_accepters_own_direction_fails_the_link() {
+        let p = pair().await;
+        p.a_peer.tell(Event::Message(0, p.b.transport().seal(0, &[]).unwrap()));
         assert!(p.b_task.await.unwrap().is_err());
     }
 
     #[tokio::test]
     async fn credit_past_the_window_fails_the_link() {
-        let p = pair();
-        let _a = p.a.open("greedy").await.unwrap();
-        let sealed = p.b.transport.seal(0, &Plain::Credit(2, ACCEPTED_CREDIT as u32 + 1).encode()).unwrap();
-        p.b_peer.send(CONTROL, sealed).await.unwrap();
+        let p = pair().await;
+        let _a = p.a.open("greedy").unwrap();
+        send_back(&p, 0, frame(CREDIT, 0, &(ACCEPTED_CREDIT as u32 + 1).to_be_bytes())).await;
         assert!(p.a_task.await.unwrap().is_err());
     }
 
     #[tokio::test]
+    async fn sending_past_credit_fails_the_link() {
+        let mut p = pair().await;
+        let _a = p.a.open("greedy").unwrap();
+        let _b = p.accepts.next().await.unwrap();
+        for _ in 0..2 {
+            send_raw(&p, lane_of(0), frame(DATA, 0, &vec![0; CHUNK])).await;
+        }
+        assert!(p.b_task.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
     async fn unaccepted_stream_takes_16_kib_then_waits_for_accept() {
-        let mut p = pair();
-        let mut a = p.a.open("slow").await.unwrap();
+        let mut p = pair().await;
+        let mut a = p.a.open("slow").unwrap();
         let mut b = p.accepts.next().await.unwrap();
         let writer = spawn(async move {
             a.write_all(&vec![1; 2 * FIRST_CREDIT]).await.unwrap();
@@ -900,10 +806,10 @@ mod tests {
 
     #[tokio::test]
     async fn accept_queue_holds_sixteen() {
-        let mut p = pair();
+        let mut p = pair().await;
         let mut opened = Vec::new();
         for _ in 0..=MAX_WAITING {
-            opened.push(p.a.open("queued").await.unwrap());
+            opened.push(p.a.open("queued").unwrap());
         }
         for _ in 0..MAX_WAITING {
             p.accepts.next().await.unwrap();
@@ -916,8 +822,8 @@ mod tests {
 
     #[tokio::test]
     async fn reset_during_a_backlog_fails_the_writer() {
-        let mut p = pair();
-        let mut a = p.a.open("backlog").await.unwrap();
+        let mut p = pair().await;
+        let mut a = p.a.open("backlog").unwrap();
         let b = p.accepts.next().await.unwrap();
         b.accept();
         let writer = spawn(async move {
@@ -940,9 +846,9 @@ mod tests {
 
     #[tokio::test]
     async fn stalled_stream_on_a_relayed_link_does_not_starve_another() {
-        let mut p = pair_with(RELAYED_BUDGET);
-        let mut stalled = p.a.open("stalled").await.unwrap();
-        let mut live = p.a.open("live").await.unwrap();
+        let mut p = pair_with(RELAYED_BUDGET).await;
+        let mut stalled = p.a.open("stalled").unwrap();
+        let mut live = p.a.open("live").unwrap();
         let b_stalled = p.accepts.next().await.unwrap();
         let mut b_live = p.accepts.next().await.unwrap();
         b_stalled.accept();
@@ -967,9 +873,9 @@ mod tests {
 
     #[tokio::test]
     async fn stalled_reader_does_not_stall_other_streams() {
-        let mut p = pair();
-        let mut a1 = p.a.open("stalled").await.unwrap();
-        let mut a2 = p.a.open("echo").await.unwrap();
+        let mut p = pair().await;
+        let mut a1 = p.a.open("stalled").unwrap();
+        let mut a2 = p.a.open("echo").unwrap();
         let b1 = p.accepts.next().await.unwrap();
         let mut b2 = p.accepts.next().await.unwrap();
         b1.accept();
@@ -989,12 +895,12 @@ mod tests {
 
     #[tokio::test]
     async fn stream_cap_refuses_the_129th_open() {
-        let p = pair();
+        let p = pair().await;
         let mut held = Vec::new();
         for _ in 0..MAX_STREAMS {
-            held.push(p.a.open("many").await.unwrap());
+            held.push(p.a.open("many").unwrap());
         }
-        let err = p.a.open("one too many").await.err().unwrap();
+        let err = p.a.open("one too many").err().unwrap();
         assert_eq!(err.kind(), io::ErrorKind::ResourceBusy);
     }
 }

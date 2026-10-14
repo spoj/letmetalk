@@ -433,7 +433,7 @@ async fn flush(inner: Arc<Inner>, mux: Arc<Mux>, key: PublicKey, session: [u8; 1
         }
         let mut bytes = Vec::new();
         ciborium::into_writer(&batch, &mut bytes).expect("CBOR into a Vec");
-        let envelope = mux.transport().seal_candidates(&session, index, &bytes).expect("candidates fit the cipher");
+        let envelope = mux.transport().seal_candidates(&session, index, &bytes).expect("candidate indexes stay below 2^40");
         index += 1;
         if inner.signal.send(key, envelope).await.is_err() {
             return;
@@ -670,7 +670,7 @@ impl Endpoint {
 
     pub async fn connect(&self, to: PublicKey, protocol: &str) -> io::Result<Stream> {
         let mux = self.0.link_to(to).await?;
-        mux.open(protocol).await
+        mux.open(protocol)
     }
 
     pub async fn accept(&self) -> Option<Stream> {
@@ -714,13 +714,12 @@ impl Endpoint {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use crate::fake;
-    use crate::backend::Peer;
+    use crate::fake::{self, Fake};
     use crate::handshake::{Dialer, Offer, Replay};
 
     /// A live, idle link of `class`: a mux over a real handshake and a fake peer. The fake's other end is returned
     /// too, since the fake fails once it is dropped.
-    async fn live_link(class: Class, used: u64) -> (Up, Arc<dyn Peer>) {
+    async fn live_link(class: Class, used: u64) -> (Up, Arc<Fake>) {
         let (a, b) = (SecretKey::generate(), SecretKey::generate());
         let (dialer, msg1) = Dialer::dial(&a, &b.public(), [1; 16], now_ms(), String::new()).unwrap();
         let offer = Offer::receive(&b, &Replay::default(), &msg1, now_ms()).unwrap();
@@ -760,7 +759,7 @@ mod tests {
         let mut busy = Vec::new();
         for entry in st.links.values() {
             if let Some(up) = &entry.up {
-                busy.push(up.mux.open("busy").await.unwrap());
+                busy.push(up.mux.open("busy").unwrap());
             }
         }
         assert_eq!(st.make_room(Class::Direct).unwrap_err().kind(), io::ErrorKind::ResourceBusy);

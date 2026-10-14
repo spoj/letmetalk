@@ -1,27 +1,37 @@
-//! An in-memory peer pair for tests. The pair starts connected; signaling is not modelled.
+//! An in-memory peer pair for tests. The pair starts with every channel open; signaling is not modelled.
 
 use std::io;
 use std::sync::Arc;
 
+use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::future::BoxFuture;
 use futures::lock::Mutex;
-use futures::StreamExt;
 
-use crate::backend::{Event, Peer};
+use crate::backend::{CHANNELS, Event, Peer};
 
 pub(crate) struct Fake {
     events: Mutex<UnboundedReceiver<Event>>,
-    own: UnboundedSender<Event>,
     other: UnboundedSender<Event>,
 }
 
-pub(crate) fn pair() -> (Arc<dyn Peer>, Arc<dyn Peer>) {
+pub(crate) fn pair() -> (Arc<Fake>, Arc<Fake>) {
     let (a_tx, a_rx) = unbounded();
     let (b_tx, b_rx) = unbounded();
-    let a = Fake { events: Mutex::new(a_rx), own: a_tx.clone(), other: b_tx.clone() };
-    let b = Fake { events: Mutex::new(b_rx), own: b_tx, other: a_tx };
+    for channel in 0..CHANNELS {
+        a_tx.unbounded_send(Event::Ready(channel)).expect("fresh queue");
+        b_tx.unbounded_send(Event::Opened(channel)).expect("fresh queue");
+    }
+    let a = Fake { events: Mutex::new(a_rx), other: b_tx };
+    let b = Fake { events: Mutex::new(b_rx), other: a_tx };
     (Arc::new(a), Arc::new(b))
+}
+
+impl Fake {
+    /// Queues an event on the other side, as a channel of its peer connection would report it.
+    pub(crate) fn tell(&self, event: Event) {
+        let _ = self.other.unbounded_send(event);
+    }
 }
 
 fn gone() -> io::Error {
@@ -45,23 +55,9 @@ impl Peer for Fake {
         Box::pin(async { unreachable!("the fake pair starts connected") })
     }
 
-    fn open(&self, channel: u32) -> BoxFuture<'_, io::Result<()>> {
-        Box::pin(async move {
-            self.other.unbounded_send(Event::Opened(channel)).map_err(|_| gone())?;
-            self.own.unbounded_send(Event::Ready(channel)).map_err(|_| gone())
-        })
-    }
-
     fn send(&self, channel: u32, data: Vec<u8>) -> BoxFuture<'_, io::Result<()>> {
         Box::pin(async move {
             self.other.unbounded_send(Event::Message(channel, data)).map_err(|_| gone())
-        })
-    }
-
-    fn close_channel(&self, channel: u32) -> BoxFuture<'_, ()> {
-        Box::pin(async move {
-            let _ = self.other.unbounded_send(Event::Closed(channel));
-            let _ = self.own.unbounded_send(Event::Closed(channel));
         })
     }
 

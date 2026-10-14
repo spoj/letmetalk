@@ -26,7 +26,7 @@ use webrtc::peer_connection::{
 use webrtc::peer_connection::{RTCStatsReport, RTCStatsReportEntry, StatsSelector};
 
 use crate::IceServer;
-use crate::backend::{Event, Peer};
+use crate::backend::{CHANNELS, Event, Peer};
 #[cfg(feature = "stats")]
 use crate::backend::Path;
 
@@ -116,7 +116,7 @@ impl Shared {
                     DataChannelEvent::OnMessage(message) => Event::Message(n, message.data.to_vec()),
                     DataChannelEvent::OnClose => {
                         shared.channels.lock().unwrap().remove(&n);
-                        let _ = shared.events.unbounded_send(Event::Closed(n));
+                        let _ = shared.events.unbounded_send(Event::Closed);
                         return;
                     }
                     _ => continue,
@@ -160,7 +160,7 @@ impl PeerConnectionEventHandler for Handler {
 
     async fn on_data_channel(&self, dc: Arc<dyn DataChannel>) {
         let Ok(n) = dc.label().await.unwrap_or_default().parse::<u32>() else {
-            let _ = dc.close().await;
+            let _ = self.0.events.unbounded_send(Event::Failed);
             return;
         };
         self.0.register(n, dc);
@@ -172,16 +172,6 @@ pub(crate) struct Native {
     pc: Arc<dyn PeerConnection>,
     shared: Arc<Shared>,
     events: AsyncMutex<UnboundedReceiver<Event>>,
-}
-
-impl Native {
-    /// The control channel is in-band, opened by the dialer before the offer. Negotiated channels would let
-    /// the first message race the peer's channel opening, and webrtc-rs drops it.
-    async fn control(&self) -> io::Result<()> {
-        let dc = self.pc.create_data_channel("0", None).await.map_err(io::Error::other)?;
-        self.shared.register(0, dc);
-        Ok(())
-    }
 }
 
 fn other(e: webrtc::error::Error) -> io::Error {
@@ -211,9 +201,14 @@ pub(crate) fn peer(ice: &[IceServer], relay_only: bool) -> BoxFuture<'static, io
 }
 
 impl Peer for Native {
+    /// The channels are in-band, created by the dialer before the offer. Negotiated channels would let the first
+    /// message race the peer's channel opening, and webrtc-rs drops it.
     fn offer(&self) -> BoxFuture<'_, io::Result<String>> {
         Box::pin(async move {
-            self.control().await?;
+            for channel in 0..CHANNELS {
+                let dc = self.pc.create_data_channel(&channel.to_string(), None).await.map_err(other)?;
+                self.shared.register(channel, dc);
+            }
             let offer = self.pc.create_offer(None).await.map_err(other)?;
             self.pc.set_local_description(offer.clone()).await.map_err(other)?;
             Ok(offer.sdp)
@@ -251,26 +246,10 @@ impl Peer for Native {
         })
     }
 
-    fn open(&self, channel: u32) -> BoxFuture<'_, io::Result<()>> {
-        Box::pin(async move {
-            let dc = self.pc.create_data_channel(&channel.to_string(), None).await.map_err(other)?;
-            self.shared.register(channel, dc);
-            Ok(())
-        })
-    }
-
     fn send(&self, channel: u32, data: Vec<u8>) -> BoxFuture<'_, io::Result<()>> {
         Box::pin(async move {
             let dc = self.shared.channel(channel)?;
             dc.send(BytesMut::from(data.as_slice())).await.map_err(other)
-        })
-    }
-
-    fn close_channel(&self, channel: u32) -> BoxFuture<'_, ()> {
-        Box::pin(async move {
-            if let Ok(dc) = self.shared.channel(channel) {
-                let _ = dc.close().await;
-            }
         })
     }
 
@@ -377,11 +356,10 @@ mod tests {
         let a = peer(&[], false).await.unwrap();
         let b = peer(&[], false).await.unwrap();
         connect(a.as_ref(), b.as_ref()).await;
-        a.open(5).await.unwrap();
-        until(a.as_ref(), |e| matches!(e, Event::Ready(5))).await;
-        until(b.as_ref(), |e| matches!(e, Event::Opened(5))).await;
-        a.send(5, b"hello".to_vec()).await.unwrap();
-        let Event::Message(5, data) = until(b.as_ref(), |e| matches!(e, Event::Message(5, _))).await else {
+        until(a.as_ref(), |e| matches!(e, Event::Ready(1))).await;
+        until(b.as_ref(), |e| matches!(e, Event::Opened(1))).await;
+        a.send(1, b"hello".to_vec()).await.unwrap();
+        let Event::Message(1, data) = until(b.as_ref(), |e| matches!(e, Event::Message(1, _))).await else {
             unreachable!()
         };
         assert_eq!(data, b"hello");

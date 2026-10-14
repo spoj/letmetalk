@@ -4,10 +4,10 @@ use common::{Carrier, Hub};
 use letmetalk::{Admit, Endpoint, SecretKey};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Each stream's channel closes after the one before it, on one link. Without the close handshake, webrtc-rs lost a
-/// stream's last messages after about 40 to 75 of them (see PLAN's Risks).
+/// Streams open and finish one after another on one link, 300 of them, so that stream numbers and lanes keep
+/// working well past the old per-stream channels.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn sequential_streams_on_one_link_all_finish() {
+async fn three_hundred_sequential_streams_on_one_link_all_finish() {
     let hub = Hub::default();
     let (a_key, b_key) = (SecretKey::generate(), SecretKey::generate());
     let a = Endpoint::new(a_key.clone(), Carrier::join(&hub, &a_key), |_| Admit::Direct);
@@ -24,7 +24,7 @@ async fn sequential_streams_on_one_link_all_finish() {
             });
         }
     });
-    for i in 0..200 {
+    for i in 0..300 {
         let mut stream = a.connect(b_key.public(), "echo").await.unwrap();
         stream.write_all(b"x").await.unwrap();
         let mut byte = [0];
