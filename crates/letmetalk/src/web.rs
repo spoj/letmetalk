@@ -64,17 +64,17 @@ fn description(kind: RtcSdpType, sdp: &str) -> RtcSessionDescriptionInit {
     init
 }
 
-type Lanes = Rc<RefCell<HashMap<u32, Lane>>>;
+type Channels = Rc<RefCell<HashMap<u32, Channel>>>;
 
 /// A data channel and its handlers. Dropping it detaches the handlers first, so no callback can reach a freed closure.
-struct Lane {
+struct Channel {
     dc: RtcDataChannel,
     _open: Closure<dyn FnMut(JsValue)>,
     _message: Closure<dyn FnMut(MessageEvent)>,
     _closed: Closure<dyn FnMut(JsValue)>,
 }
 
-impl Drop for Lane {
+impl Drop for Channel {
     fn drop(&mut self) {
         self.dc.set_onopen(None);
         self.dc.set_onmessage(None);
@@ -84,7 +84,7 @@ impl Drop for Lane {
 
 /// Wires a channel's events into the peer's queue. Its numbers are letmetalk's, from the label. Only binary messages
 /// are letmetalk's; a text message fails the link.
-fn attach(events: &UnboundedSender<Event>, lanes: &Lanes, n: u32, dc: RtcDataChannel) {
+fn attach(events: &UnboundedSender<Event>, channels: &Channels, n: u32, dc: RtcDataChannel) {
     dc.set_binary_type(RtcDataChannelType::Arraybuffer);
     let tx = events.clone();
     let open = Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| {
@@ -105,14 +105,14 @@ fn attach(events: &UnboundedSender<Event>, lanes: &Lanes, n: u32, dc: RtcDataCha
     dc.set_onopen(Some(open.as_ref().unchecked_ref()));
     dc.set_onmessage(Some(message.as_ref().unchecked_ref()));
     dc.set_onclose(Some(closed.as_ref().unchecked_ref()));
-    let lane = Lane { dc, _open: open, _message: message, _closed: closed };
-    lanes.borrow_mut().insert(n, lane);
+    let channel = Channel { dc, _open: open, _message: message, _closed: closed };
+    channels.borrow_mut().insert(n, channel);
 }
 
 struct Inner {
     pc: RtcPeerConnection,
     events: UnboundedSender<Event>,
-    lanes: Lanes,
+    channels: Channels,
     _candidate: Closure<dyn FnMut(RtcPeerConnectionIceEvent)>,
     _state: Closure<dyn FnMut(JsValue)>,
     _channel: Closure<dyn FnMut(RtcDataChannelEvent)>,
@@ -131,7 +131,7 @@ impl Inner {
     /// Creates channel `n` in band. The offer carries it, since it is created before the offer.
     fn create(&self, n: u32) {
         let dc = self.pc.create_data_channel(&n.to_string());
-        attach(&self.events, &self.lanes, n, dc);
+        attach(&self.events, &self.channels, n, dc);
     }
 
     fn set_local(&self, kind: RtcSdpType, sdp: &str) -> Promise {
@@ -150,9 +150,9 @@ impl Inner {
     }
 
     fn write(&self, n: u32, data: &[u8]) -> io::Result<()> {
-        let lanes = self.lanes.borrow();
-        let lane = lanes.get(&n).ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no such channel"))?;
-        lane.dc.send_with_u8_array(data).map_err(js)
+        let channels = self.channels.borrow();
+        let channel = channels.get(&n).ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no such channel"))?;
+        channel.dc.send_with_u8_array(data).map_err(js)
     }
 }
 
@@ -165,7 +165,7 @@ impl Web {
     fn new(config: &RtcConfiguration) -> Result<Web, JsValue> {
         let pc = RtcPeerConnection::new_with_configuration(config)?;
         let (events, rx) = unbounded();
-        let lanes: Lanes = Rc::default();
+        let channels: Channels = Rc::default();
 
         let tx = events.clone();
         let candidate = Closure::<dyn FnMut(RtcPeerConnectionIceEvent)>::new(move |event: RtcPeerConnectionIceEvent| {
@@ -184,20 +184,20 @@ impl Web {
             };
             let _ = tx.unbounded_send(event);
         });
-        let (tx, channels) = (events.clone(), lanes.clone());
+        let (tx, attached) = (events.clone(), channels.clone());
         let channel = Closure::<dyn FnMut(RtcDataChannelEvent)>::new(move |event: RtcDataChannelEvent| {
             let dc = event.channel();
             let Ok(n) = dc.label().parse::<u32>() else {
                 let _ = tx.unbounded_send(Event::Failed);
                 return;
             };
-            attach(&tx, &channels, n, dc);
+            attach(&tx, &attached, n, dc);
             let _ = tx.unbounded_send(Event::Opened(n));
         });
         pc.set_onicecandidate(Some(candidate.as_ref().unchecked_ref()));
         pc.set_onconnectionstatechange(Some(state.as_ref().unchecked_ref()));
         pc.set_ondatachannel(Some(channel.as_ref().unchecked_ref()));
-        let inner = Inner { pc, events, lanes, _candidate: candidate, _state: state, _channel: channel };
+        let inner = Inner { pc, events, channels, _candidate: candidate, _state: state, _channel: channel };
         Ok(Web { inner: SendWrapper::new(inner), events: AsyncMutex::new(rx) })
     }
 }
@@ -277,7 +277,7 @@ impl Peer for Web {
     fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {
             let _ = self.inner.events.unbounded_send(Event::Failed);
-            self.inner.lanes.borrow_mut().clear();
+            self.inner.channels.borrow_mut().clear();
             self.inner.pc.close();
         })
     }
@@ -354,7 +354,7 @@ mod tests {
         let b = Web::new(&configuration(&[], false)).unwrap();
         connect(&a, &b).await;
         next_matching(&a, |e| matches!(e, Event::Ready(1))).await;
-        a.inner.lanes.borrow()[&1].dc.send_with_str("text").unwrap();
+        a.inner.channels.borrow()[&1].dc.send_with_str("text").unwrap();
         let next = next_matching(&b, |e| matches!(e, Event::Failed | Event::Message(..)));
         let event = timeout(Duration::from_secs(10), next).await.expect("an event within 10 s");
         assert!(matches!(event, Event::Failed));
