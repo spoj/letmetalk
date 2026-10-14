@@ -1,13 +1,13 @@
-{"pair":"iroh-direct","scenario":"env","run":1,"loadavg_start":"2.91 3.32 3.16","rmem_max":4194304}
-{"pair":"iroh-direct","scenario":"cold","median_ms":1.229102,"samples_ms":[1.3951339999999999,1.229102,1.093468,0.894215,1.241917]}
-{"pair":"iroh-direct","scenario":"warm","median_ms":0.077967,"samples_ms":[0.12965200000000002,0.07370800000000001,0.062957,0.066595,0.06593399999999999,0.075552,0.077967,0.082795,0.06393,0.07796600000000001,0.081333,0.09612,0.110287,0.121076,0.102852,0.09197200000000001,0.067636,0.064611,0.079489,0.057929]}
-{"pair":"iroh-direct","scenario":"path","route":{"local":"Ip(Some(127.0.0.1))","relayed":false,"remote":"ip:127.0.0.1:44064","rtt_ms":0.055903}}
-{"pair":"iroh-direct","scenario":"bulk_up","bytes":268435456,"mb_s":905.6528230579523,"secs":0.296399955}
-{"pair":"iroh-direct","scenario":"bulk_down","bytes":268435456,"mb_s":846.2850471473621,"secs":0.31719272}
-{"pair":"iroh-direct","scenario":"bulk_4x64","bytes":268435456,"mb_s":838.4569310173964,"secs":0.320154138}
-{"pair":"iroh-direct","scenario":"latency_idle","n":1000,"p50_ms":0.093886,"p95_ms":0.134632,"p99_ms":0.191779}
-{"pair":"iroh-direct","scenario":"latency_load","bulk_mb_s":937.9478810413068,"echo":{"n":1000,"p50_ms":0.49618899999999994,"p95_ms":1.970903,"p99_ms":3.5069709999999996}}
-{"pair":"iroh-direct","scenario":"crypto","block_bytes":16384,"open_mb_s":1994.683055086659,"seal_mb_s":1986.8471434276694}
-{"pair":"iroh-direct","peak_rss_kib":27900,"scenario":"rss"}
-{"pair":"iroh-direct","scenario":"serve_rss","peak_rss_kib":26236}
-{"pair":"iroh-direct","scenario":"env","run":1,"loadavg_end":"2.94 3.30 3.16"}
+{"pair":"iroh-direct","scenario":"env","run":1,"loadavg_start":"4.13 5.32 17.91","rmem_max":4194304}
+{"pair":"iroh-direct","scenario":"cold","median_ms":0.9222199999999999,"samples_ms":[1.448077,0.897614,0.9222199999999999,0.790453,0.9241539999999999]}
+{"pair":"iroh-direct","scenario":"warm","median_ms":0.056135,"samples_ms":[0.189686,0.083056,0.057759,0.06941,0.064581,0.07993,0.060112000000000006,0.049654000000000004,0.042359,0.045866,0.046176,0.043502,0.049483,0.056135,0.050324999999999995,0.05345,0.048770999999999995,0.06402,0.063679,0.055143]}
+{"pair":"iroh-direct","scenario":"path","route":{"local":"Ip(Some(127.0.0.1))","relayed":false,"remote":"ip:127.0.0.1:36596","rtt_ms":0.052317}}
+{"pair":"iroh-direct","scenario":"bulk_up","bytes":268435456,"mb_s":950.7972107691205,"secs":0.282326718}
+{"pair":"iroh-direct","scenario":"bulk_down","bytes":268435456,"mb_s":908.3349121350607,"secs":0.295524759}
+{"pair":"iroh-direct","scenario":"bulk_4x64","bytes":268435456,"mb_s":875.6629803982408,"secs":0.306551107}
+{"pair":"iroh-direct","scenario":"latency_idle","n":1000,"p50_ms":0.09566000000000001,"p95_ms":0.12382199999999999,"p99_ms":0.169228}
+{"pair":"iroh-direct","scenario":"latency_load","bulk_mb_s":919.5770156709859,"echo":{"n":1000,"p50_ms":0.484178,"p95_ms":1.874938,"p99_ms":3.799088}}
+{"pair":"iroh-direct","scenario":"crypto","block_bytes":16384,"open_mb_s":1960.9535750520517,"seal_mb_s":1961.0160065870834}
+{"pair":"iroh-direct","peak_rss_kib":26088,"scenario":"rss"}
+{"pair":"iroh-direct","scenario":"serve_rss","peak_rss_kib":28372}
+{"pair":"iroh-direct","scenario":"env","run":1,"loadavg_end":"3.87 5.21 17.67"}

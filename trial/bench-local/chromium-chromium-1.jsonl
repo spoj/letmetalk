@@ -1,11 +1,11 @@
-{"pair":"chromium-chromium","scenario":"env","run":1,"loadavg_start":"2.54 3.40 3.17","rmem_max":4194304}
-{"pair":"chromium-chromium","scenario":"cold","median_ms":56.800000000000004,"samples_ms":[68.9,57.1,56.5,56.099999999999994,56.800000000000004]}
-{"pair":"chromium-chromium","scenario":"warm","median_ms":0.3,"samples_ms":[0.5,0.3,0.2,0.2,0.3,0.3,0.3,0.2,0.3,0.3,0.3,0.3,0.3,0.2,0.3,0.3,0.2,0.4,0.3,0.3]}
+{"pair":"chromium-chromium","scenario":"env","run":1,"loadavg_start":"3.51 5.36 18.82","rmem_max":4194304}
+{"pair":"chromium-chromium","scenario":"cold","median_ms":46.9,"samples_ms":[52.0,48.099999999999994,46.6,46.9,46.0]}
+{"pair":"chromium-chromium","scenario":"warm","median_ms":0.2,"samples_ms":[0.0,0.1,0.2,0.2,0.2,0.1,0.1,0.3,0.1,0.2,0.2,0.1,0.3,0.2,0.2,0.1,0.2,0.2,0.4,0.1]}
 {"pair":"chromium-chromium","scenario":"path","route":{"local":"host","relayed":false,"remote":"host","rtt_ms":0.0}}
-{"pair":"chromium-chromium","scenario":"bulk_up","bytes":268435456,"mb_s":96.22032260377088,"secs":2.7898}
-{"pair":"chromium-chromium","scenario":"bulk_down","bytes":268435456,"mb_s":41.61402908256596,"secs":6.4506}
-{"pair":"chromium-chromium","scenario":"bulk_4x64","bytes":268435456,"mb_s":7.877135730592936,"secs":34.0778}
-{"pair":"chromium-chromium","scenario":"latency_idle","n":1000,"p50_ms":0.2,"p95_ms":0.3,"p99_ms":0.3}
-{"pair":"chromium-chromium","scenario":"latency_load","bulk_mb_s":49.06014528387483,"echo":{"n":1000,"p50_ms":3.6,"p95_ms":6.6,"p99_ms":9.9}}
-{"pair":"chromium-chromium","scenario":"crypto","block_bytes":16384,"open_mb_s":471.28576,"seal_mb_s":470.990848}
-{"pair":"chromium-chromium","scenario":"env","run":1,"loadavg_end":"2.91 3.32 3.16"}
+{"pair":"chromium-chromium","scenario":"bulk_up","bytes":268435456,"mb_s":24.708940251659165,"secs":10.8639}
+{"pair":"chromium-chromium","scenario":"bulk_down","bytes":268435456,"mb_s":34.282068912671456,"secs":7.8302}
+{"pair":"chromium-chromium","scenario":"bulk_4x64","bytes":268435456,"mb_s":13.30554883096155,"secs":20.1747}
+{"pair":"chromium-chromium","scenario":"latency_idle","n":1000,"p50_ms":0.2,"p95_ms":0.3,"p99_ms":0.4}
+{"pair":"chromium-chromium","scenario":"latency_load","bulk_mb_s":55.53365641202124,"echo":{"n":1000,"p50_ms":4.3,"p95_ms":7.4,"p99_ms":11.5}}
+{"pair":"chromium-chromium","scenario":"crypto","block_bytes":16384,"open_mb_s":484.048896,"seal_mb_s":480.0512}
+{"pair":"chromium-chromium","scenario":"env","run":1,"loadavg_end":"4.13 5.32 17.91"}

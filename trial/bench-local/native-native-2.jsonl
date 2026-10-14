@@ -1,13 +1,13 @@
-{"pair":"native-native","scenario":"env","run":2,"loadavg_start":"3.66 3.44 3.21","rmem_max":4194304}
-{"pair":"native-native","scenario":"cold","median_ms":605.703135,"samples_ms":[605.703135,605.519822,604.7793350000001,606.022725,606.116612]}
-{"pair":"native-native","scenario":"warm","median_ms":0.18154,"samples_ms":[0.244508,0.15019100000000002,0.199995,0.221996,0.18504700000000002,0.24422799999999997,0.235381,0.195406,0.163817,0.142046,0.18154,0.150101,0.198061,0.177653,0.15568099999999999,0.198953,0.173545,0.160731,0.17115000000000002,0.155912]}
-{"pair":"native-native","scenario":"path","route":{"local":"host","relayed":false,"remote":"host","rtt_ms":0.048229999999999995}}
-{"pair":"native-native","scenario":"bulk_up","bytes":268435456,"mb_s":172.00212748011867,"secs":1.560651952}
-{"pair":"native-native","scenario":"bulk_down","bytes":268435456,"mb_s":168.79551827661078,"secs":1.590299664}
-{"pair":"native-native","scenario":"bulk_4x64","bytes":268435456,"mb_s":192.81217238246467,"secs":1.392212186}
-{"pair":"native-native","scenario":"latency_idle","n":1000,"p50_ms":0.134242,"p95_ms":0.170589,"p99_ms":0.19970400000000002}
-{"pair":"native-native","scenario":"latency_load","bulk_mb_s":172.10563291345886,"echo":{"n":1000,"p50_ms":2.8570029999999997,"p95_ms":7.289086999999999,"p99_ms":9.989817}}
-{"pair":"native-native","scenario":"crypto","block_bytes":16384,"open_mb_s":2012.044049405012,"seal_mb_s":2009.3143017491184}
-{"pair":"native-native","peak_rss_kib":48300,"scenario":"rss"}
-{"pair":"native-native","scenario":"serve_rss","peak_rss_kib":32056}
-{"pair":"native-native","scenario":"env","run":2,"loadavg_end":"3.59 3.44 3.21"}
+{"pair":"native-native","scenario":"env","run":2,"loadavg_start":"4.18 5.16 17.32","rmem_max":4194304}
+{"pair":"native-native","scenario":"cold","median_ms":58.609069,"samples_ms":[58.609069,58.382805000000005,57.362379999999995,63.547945999999996,64.652157]}
+{"pair":"native-native","scenario":"warm","median_ms":0.103785,"samples_ms":[0.108544,0.11764000000000001,0.128291,0.103504,0.103444,0.12373199999999998,0.107001,0.128691,0.102342,0.08446899999999999,0.102172,0.147878,0.105407,0.10157000000000001,0.103785,0.10131,0.092333,0.080662,0.10618899999999999,0.100899]}
+{"pair":"native-native","scenario":"path","route":{"local":"host","relayed":false,"remote":"host","rtt_ms":0.043892}}
+{"pair":"native-native","scenario":"bulk_up","bytes":268435456,"mb_s":182.30317051938755,"secs":1.472467293}
+{"pair":"native-native","scenario":"bulk_down","bytes":268435456,"mb_s":184.00782715260235,"secs":1.458826291}
+{"pair":"native-native","scenario":"bulk_4x64","bytes":268435456,"mb_s":193.3248509022745,"secs":1.388520176}
+{"pair":"native-native","scenario":"latency_idle","n":1000,"p50_ms":0.121939,"p95_ms":0.157766,"p99_ms":0.206117}
+{"pair":"native-native","scenario":"latency_load","bulk_mb_s":184.81284965861758,"echo":{"n":1000,"p50_ms":3.945112,"p95_ms":6.36408,"p99_ms":9.745544}}
+{"pair":"native-native","scenario":"crypto","block_bytes":16384,"open_mb_s":1963.6698926989407,"seal_mb_s":1955.7988572692934}
+{"pair":"native-native","peak_rss_kib":43260,"scenario":"rss"}
+{"pair":"native-native","scenario":"serve_rss","peak_rss_kib":26940}
+{"pair":"native-native","scenario":"env","run":2,"loadavg_end":"3.96 5.02 16.95"}

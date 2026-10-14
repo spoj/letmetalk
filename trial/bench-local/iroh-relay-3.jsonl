@@ -1,13 +1,13 @@
-{"pair":"iroh-relay","scenario":"env","run":3,"loadavg_start":"4.50 3.57 3.27","rmem_max":4194304}
-{"pair":"iroh-relay","scenario":"cold","median_ms":2.320038,"samples_ms":[2.84415,2.3299060000000003,2.172451,2.320038,2.168774]}
-{"pair":"iroh-relay","scenario":"warm","median_ms":0.108764,"samples_ms":[0.15138400000000002,0.145182,0.12243000000000001,0.10471699999999999,0.10651,0.080922,0.14324800000000001,0.09674100000000001,0.131848,0.12390200000000001,0.104135,0.095599,0.12712800000000002,0.108764,0.12255999999999999,0.102462,0.099146,0.089558,0.079118,0.11025599999999999]}
-{"pair":"iroh-relay","scenario":"path","route":{"local":"Relay(RelayUrl(\"http://127.0.0.1:18792/\"))","relayed":true,"remote":"relay:http://127.0.0.1:18792/","rtt_ms":0.333749}}
-{"pair":"iroh-relay","scenario":"bulk_up","bytes":268435456,"mb_s":123.93948678169392,"secs":2.165859025}
-{"pair":"iroh-relay","scenario":"bulk_down","bytes":268435456,"mb_s":130.66619768435532,"secs":2.054360353}
-{"pair":"iroh-relay","scenario":"bulk_4x64","bytes":268435456,"mb_s":119.90643282337231,"secs":2.238707713}
-{"pair":"iroh-relay","scenario":"latency_idle","n":1000,"p50_ms":0.174757,"p95_ms":0.343003,"p99_ms":0.571862}
-{"pair":"iroh-relay","scenario":"latency_load","bulk_mb_s":143.6510470222625,"echo":{"n":1000,"p50_ms":4.044309,"p95_ms":5.009508,"p99_ms":5.4941759999999995}}
-{"pair":"iroh-relay","scenario":"crypto","block_bytes":16384,"open_mb_s":1972.0275501573174,"seal_mb_s":1963.880113486464}
-{"pair":"iroh-relay","peak_rss_kib":27584,"scenario":"rss"}
-{"pair":"iroh-relay","scenario":"serve_rss","peak_rss_kib":30216}
-{"pair":"iroh-relay","scenario":"env","run":3,"loadavg_end":"6.91 4.26 3.51"}
+{"pair":"iroh-relay","scenario":"env","run":3,"loadavg_start":"3.28 4.38 13.59","rmem_max":4194304}
+{"pair":"iroh-relay","scenario":"cold","median_ms":2.497876,"samples_ms":[3.1540980000000003,2.497876,2.51031,2.274487,2.238019]}
+{"pair":"iroh-relay","scenario":"warm","median_ms":0.11746000000000001,"samples_ms":[0.14815799999999998,0.160421,0.11869299999999999,0.10672,0.161212,0.129934,0.11746000000000001,0.121598,0.092964,0.11152899999999999,0.138961,0.111499,0.11649799999999999,0.098164,0.150733,0.105768,0.161984,0.11721,0.104096,0.07983900000000001]}
+{"pair":"iroh-relay","scenario":"path","route":{"local":"Relay(RelayUrl(\"http://127.0.0.1:18792/\"))","relayed":true,"remote":"relay:http://127.0.0.1:18792/","rtt_ms":0.355384}}
+{"pair":"iroh-relay","scenario":"bulk_up","bytes":268435456,"mb_s":122.87902757644542,"secs":2.184550621}
+{"pair":"iroh-relay","scenario":"bulk_down","bytes":268435456,"mb_s":124.08946335720253,"secs":2.163241332}
+{"pair":"iroh-relay","scenario":"bulk_4x64","bytes":268435456,"mb_s":123.41563048390108,"secs":2.175052341}
+{"pair":"iroh-relay","scenario":"latency_idle","n":1000,"p50_ms":0.164379,"p95_ms":0.20925300000000002,"p99_ms":0.272482}
+{"pair":"iroh-relay","scenario":"latency_load","bulk_mb_s":125.51777875735213,"echo":{"n":1000,"p50_ms":4.14649,"p95_ms":5.164068,"p99_ms":5.472477}}
+{"pair":"iroh-relay","scenario":"crypto","block_bytes":16384,"open_mb_s":1939.0615410615524,"seal_mb_s":1926.454011772716}
+{"pair":"iroh-relay","peak_rss_kib":28944,"scenario":"rss"}
+{"pair":"iroh-relay","scenario":"serve_rss","peak_rss_kib":29564}
+{"pair":"iroh-relay","scenario":"env","run":3,"loadavg_end":"4.10 4.50 13.38"}
