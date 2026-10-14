@@ -5,7 +5,7 @@
 <pre id="out"></pre>
 <script type="module">
   import init, { run } from "./pkg/letmetalk_bench.js";
-  const params = new URLSearchParams(location.search);
+  const params = new URLSearchParams(location.hash.slice(1));
   const role = params.get("role");
   const status = document.getElementById("status");
   const out = document.getElementById("out");

@@ -1,0 +1,38 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths: [crates/bench/**, crates/letmetalk/**, .github/workflows/pages.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo install --locked wasm-bindgen-cli --version 0.2.129
+      - run: cargo build --release -p bench --lib --target wasm32-unknown-unknown --no-default-features
+      - run: |
+          wasm-bindgen --target web --out-dir site/pkg target/wasm32-unknown-unknown/release/letmetalk_bench.wasm
+          cp crates/bench/web/index.html site/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

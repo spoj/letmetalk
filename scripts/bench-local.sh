@@ -65,7 +65,7 @@ server_rss() {
   printf '{"pair":"%s","scenario":"serve_rss","peak_rss_kib":%s}\n' "$1" "$(awk '/VmHWM/ {print $2}' "/proc/$2/status")"
 }
 start_browser_server() {
-  node scripts/bench-browser.mjs serve "$PAGE?role=serve&url=$WS&key=$SERVE&pair=chromium" > "$keys/server.out" 2>&1 &
+  node scripts/bench-browser.mjs serve "$PAGE#role=serve&url=$WS&key=$SERVE&pair=chromium" > "$keys/server.out" 2>&1 &
   browser_server=$!
   wait_for ready "$keys/server.out"
 }
@@ -95,7 +95,7 @@ for run in $(seq "$RUNS"); do
   f="$OUT/chromium-chromium-$run.jsonl"
   env_line chromium-chromium "$run" > "$f"
   start_browser_server
-  node scripts/bench-browser.mjs dial "$PAGE?role=dial&url=$WS&key=$DIAL&peer=$SERVE_PUB&pair=chromium-chromium" "$keys/dial.out"
+  node scripts/bench-browser.mjs dial "$PAGE#role=dial&url=$WS&key=$DIAL&peer=$SERVE_PUB&pair=chromium-chromium" "$keys/dial.out"
   cat "$keys/dial.out" >> "$f"
   end_line chromium-chromium "$run" >> "$f"
   stop "$browser_server"

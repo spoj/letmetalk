@@ -656,6 +656,9 @@ direct and relay-only). Decisions:
   have no RSS figure.
 - **Environment.** `bench-local.sh` records the load average (1, 5, 15 minutes) before and after each run, and
   `net.core.rmem_max`. Socket buffers matter (spike 2), so the report states them.
+- **Hosted page.** `.github/workflows/pages.yml` publishes the page to https://spoj.github.io/letmetalk/ from main, for
+  real-world runs on devices. Its parameters (`role`, `url`, `key`, `peer`, `pair`) go in the URL's fragment, so the
+  key never reaches a server.
 - **Browser.** The page prints its lines into `#out` and sets `#status` to `done` or `failed`. Playwright reads them. The
   `.wasm` is recorded as wasm-bindgen writes it, raw and gzipped. Nothing shrinks it with `wasm-opt`, so the number is
   the untuned build.
