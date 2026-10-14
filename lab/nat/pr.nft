@@ -1,0 +1,13 @@
+table ip nat {
+    chain post {
+        type nat hook postrouting priority srcnat;
+        oifname $wan masquerade;
+    }
+}
+table inet filter {
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        ct state established,related accept;
+        iifname $lans oifname $wan accept;
+    }
+}

@@ -1,0 +1,18 @@
+table ip nat {
+    chain pre {
+        type nat hook prerouting priority dstnat;
+        iifname $wan ip protocol udp ct state new dnat to $peer;
+    }
+    chain post {
+        type nat hook postrouting priority srcnat;
+        oifname $wan masquerade;
+    }
+}
+table inet filter {
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        ct state established,related accept;
+        ct status dnat accept;
+        iifname $lans oifname $wan accept;
+    }
+}

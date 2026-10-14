@@ -552,6 +552,32 @@ Pairs and baselines:
   - WAN, at 50 ms RTT with 1% loss;
   - constrained, at 10 Mbit/s with a deep buffer.
 - **Browsers:** headless Chromium (Playwright) containers.
+- **Realisation** (`lab/`):
+  - The internet is 203.0.113.0/24 (TEST-NET-3), which coturn's denied ranges leave open. LANs are 10.20.x.0/24, each
+    with its router at .254.
+  - `none` is the peer on the internet with its own address and no router: a router that does no NAT would not make
+    its LAN reachable.
+  - The forwarder listens on plain `ws` at 443, so the signaling crosses a UDP-blocked NAT. Peers reach it through a
+    loopback tunnel at `127.0.0.1:8787`, since `WsSignal` refuses `ws://` off loopback and the lab has no public
+    certificate. The login's host is then `127.0.0.1`. The forwarder's TLS is not measured in the lab; the real-world
+    runs cover `wss`.
+  - coturn runs the repo's member and stranger configs, each with two listening addresses: the second is the RFC 5780
+    alternate. `bps-capacity` is 125000000, as deployed, since coturn 4.6 refuses every allocation when it equals
+    `max-bps`. iroh-relay serves plain HTTP on 443.
+  - Profiles shape each peer's access link in both directions (netem on egress, `ifb0` for ingress). `lan` is
+    unshaped. `wan` adds 12.5 ms and 0.5% loss per link, so two peers see 50 ms RTT and about 1% loss; the servers are
+    unshaped. `constrained` is netem at 10 Mbit/s with a 5000-packet queue, about 6 s deep.
+  - The NAT probe is `turnutils_natdiscovery -m -f` against the member coturn, run from the peer behind its NAT. Each
+    label must probe as: `none` and `eif`, endpoint-independent mapping and filtering; `pr`, endpoint-independent
+    mapping and address-and-port-dependent filtering; `sym`, address-and-port-dependent mapping and filtering; `blk`,
+    no UDP reply, with TCP 443 open.
+  - `lab/pairs.txt` lists the pairs. The NAT types are `none`, `eif`, `pr`, `sym` and `blk`. `eif`, `pr` and `sym` meet
+    `none`, `pr` and `sym`, `sym` among them, which must use TURN. `blk` meets `none`, `eif`, `pr` and `sym`. Browser
+    rows repeat NAT rows with a browser on one side.
+  - Same-host runs both roles in one peer. Same-LAN puts two peers on one LAN with multicast blocked, as a blackhole
+    route for 224.0.0.0/4.
+  - Hairpin puts two peers on separate LANs behind one router, which forwards only LAN to WAN. Without hairpin NAT,
+    the pair has no direct path, so it must relay or fail. Both stacks run it, so iroh is the comparison.
 
 Real-world runs use the owner's devices:
 - a laptop on home Wi-Fi;

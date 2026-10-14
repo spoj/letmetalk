@@ -1,0 +1,214 @@
+# The lab: an internet network with the trial's servers, a router per NAT'd slot, and peers behind them.
+# Peers in slot a run behind router-a, and so on. NAT_A, NAT_B and NAT_H pick each router's NAT, and
+# PROFILE the shaping. run.sh sets them per pair. With NAT none the router is not started: the slot's peers
+# join the internet network directly, with a public address.
+x-build: &build
+  context: ..
+  dockerfile: lab/Containerfile
+
+x-net-admin: &net-admin
+  cap_add: [NET_ADMIN]
+
+networks:
+  internet:
+    internal: true
+    ipam: { config: [{ subnet: 203.0.113.0/24 }] }
+  lan-a:
+    internal: true
+    ipam: { config: [{ subnet: 10.20.1.0/24 }] }
+  lan-b:
+    internal: true
+    ipam: { config: [{ subnet: 10.20.2.0/24 }] }
+  lan-h1:
+    internal: true
+    ipam: { config: [{ subnet: 10.20.3.0/24 }] }
+  lan-h2:
+    internal: true
+    ipam: { config: [{ subnet: 10.20.4.0/24 }] }
+
+services:
+  signal:
+    build: { <<: *build, target: signal }
+    image: letmetalk-lab/signal
+    command:
+      - --listen=203.0.113.2:443
+      - --host=127.0.0.1
+      - --allowlist=/lab/keys/allowlist
+      - --member-turn=turn:203.0.113.10:3478
+      - --member-turn=turns:203.0.113.10:443?transport=tcp
+      - --stranger-turn=turn:203.0.113.12:3478
+      - --stranger-turn=turns:203.0.113.12:443?transport=tcp
+    environment:
+      MEMBER_SECRET: lab-member-secret
+      STRANGER_SECRET: lab-stranger-secret
+    networks:
+      internet: { ipv4_address: 203.0.113.2 }
+
+  coturn-member:
+    build: { <<: *build, target: coturn }
+    image: letmetalk-lab/coturn
+    <<: *net-admin
+    environment:
+      CONF: member
+      IP: 203.0.113.10
+      ALT: 203.0.113.11
+      TURN_SECRET: lab-member-secret
+    networks:
+      internet: { ipv4_address: 203.0.113.10 }
+
+  coturn-stranger:
+    build: { <<: *build, target: coturn }
+    image: letmetalk-lab/coturn
+    <<: *net-admin
+    environment:
+      CONF: stranger
+      IP: 203.0.113.12
+      ALT: 203.0.113.13
+      TURN_SECRET: lab-stranger-secret
+    networks:
+      internet: { ipv4_address: 203.0.113.12 }
+
+  iroh-relay:
+    build: { <<: *build, target: iroh-relay }
+    image: letmetalk-lab/iroh-relay
+    volumes: ["./iroh-relay.toml:/etc/iroh-relay.toml:ro"]
+    command: ["--config-path=/etc/iroh-relay.toml"]
+    networks:
+      internet: { ipv4_address: 203.0.113.20 }
+
+  router-a:
+    build: { <<: *build, target: router }
+    image: letmetalk-lab/router
+    <<: *net-admin
+    sysctls: { net.ipv4.ip_forward: "1" }
+    environment: { NAT: "${NAT_A:-pr}", PEER: 10.20.1.2 }
+    networks:
+      internet: { ipv4_address: 203.0.113.31 }
+      lan-a: { ipv4_address: 10.20.1.254 }
+
+  router-b:
+    build: { <<: *build, target: router }
+    image: letmetalk-lab/router
+    <<: *net-admin
+    sysctls: { net.ipv4.ip_forward: "1" }
+    environment: { NAT: "${NAT_B:-pr}", PEER: 10.20.2.2 }
+    networks:
+      internet: { ipv4_address: 203.0.113.32 }
+      lan-b: { ipv4_address: 10.20.2.254 }
+
+  router-h:
+    build: { <<: *build, target: router }
+    image: letmetalk-lab/router
+    <<: *net-admin
+    sysctls: { net.ipv4.ip_forward: "1" }
+    environment: { NAT: "${NAT_H:-pr}", PEER: 10.20.3.2 }
+    networks:
+      internet: { ipv4_address: 203.0.113.33 }
+      lan-h1: { ipv4_address: 10.20.3.254 }
+      lan-h2: { ipv4_address: 10.20.4.254 }
+
+  native-a:
+    <<: *net-admin
+    build: { <<: *build, target: peer }
+    image: letmetalk-lab/peer
+    environment: &env-a
+      NAT: "${NAT_A:-none}"
+      GATEWAY: 10.20.1.254
+      PROFILE: "${PROFILE:-lan}"
+      MULTICAST: "${MULTICAST:-}"
+    networks:
+      internet: { ipv4_address: 203.0.113.41 }
+      lan-a: { ipv4_address: 10.20.1.2 }
+
+  browser-a:
+    <<: *net-admin
+    build: { <<: *build, target: browser }
+    image: letmetalk-lab/browser
+    environment: *env-a
+    networks:
+      internet: { ipv4_address: 203.0.113.42 }
+      lan-a: { ipv4_address: 10.20.1.2 }
+
+  native-a2:
+    <<: *net-admin
+    build: { <<: *build, target: peer }
+    image: letmetalk-lab/peer
+    environment: *env-a
+    networks:
+      internet: { ipv4_address: 203.0.113.43 }
+      lan-a: { ipv4_address: 10.20.1.3 }
+
+  browser-a2:
+    <<: *net-admin
+    build: { <<: *build, target: browser }
+    image: letmetalk-lab/browser
+    environment: *env-a
+    networks:
+      internet: { ipv4_address: 203.0.113.44 }
+      lan-a: { ipv4_address: 10.20.1.3 }
+
+  native-b:
+    <<: *net-admin
+    build: { <<: *build, target: peer }
+    image: letmetalk-lab/peer
+    environment: &env-b
+      NAT: "${NAT_B:-none}"
+      GATEWAY: 10.20.2.254
+      PROFILE: "${PROFILE:-lan}"
+      MULTICAST: "${MULTICAST:-}"
+    networks:
+      internet: { ipv4_address: 203.0.113.45 }
+      lan-b: { ipv4_address: 10.20.2.2 }
+
+  browser-b:
+    <<: *net-admin
+    build: { <<: *build, target: browser }
+    image: letmetalk-lab/browser
+    environment: *env-b
+    networks:
+      internet: { ipv4_address: 203.0.113.46 }
+      lan-b: { ipv4_address: 10.20.2.2 }
+
+  native-h1:
+    <<: *net-admin
+    build: { <<: *build, target: peer }
+    image: letmetalk-lab/peer
+    environment: &env-h1
+      NAT: "${NAT_H:-none}"
+      GATEWAY: 10.20.3.254
+      PROFILE: "${PROFILE:-lan}"
+      MULTICAST: "${MULTICAST:-}"
+    networks:
+      internet: { ipv4_address: 203.0.113.47 }
+      lan-h1: { ipv4_address: 10.20.3.2 }
+
+  browser-h1:
+    <<: *net-admin
+    build: { <<: *build, target: browser }
+    image: letmetalk-lab/browser
+    environment: *env-h1
+    networks:
+      internet: { ipv4_address: 203.0.113.48 }
+      lan-h1: { ipv4_address: 10.20.3.2 }
+
+  native-h2:
+    <<: *net-admin
+    build: { <<: *build, target: peer }
+    image: letmetalk-lab/peer
+    environment: &env-h2
+      NAT: "${NAT_H:-none}"
+      GATEWAY: 10.20.4.254
+      PROFILE: "${PROFILE:-lan}"
+      MULTICAST: "${MULTICAST:-}"
+    networks:
+      internet: { ipv4_address: 203.0.113.49 }
+      lan-h2: { ipv4_address: 10.20.4.2 }
+
+  browser-h2:
+    <<: *net-admin
+    build: { <<: *build, target: browser }
+    image: letmetalk-lab/browser
+    environment: *env-h2
+    networks:
+      internet: { ipv4_address: 203.0.113.50 }
+      lan-h2: { ipv4_address: 10.20.4.2 }
