@@ -13,7 +13,7 @@
   status.textContent = role === "serve" ? "serving" : "running";
   try {
     await run(role, params.get("url"), params.get("key"), params.get("peer") ?? "", params.get("pair") ?? "browser",
-      (line) => { out.textContent += line + "\n"; });
+      Number(params.get("bulk") ?? 256), (line) => { out.textContent += line + "\n"; });
     status.textContent = "done";
   } catch (e) {
     status.textContent = "failed: " + e;

@@ -28,8 +28,6 @@ pub const SINK: &str = "sink";
 /// `source:<bytes>` writes that many bytes and finishes.
 pub const SOURCE: &str = "source:";
 
-const MIB: usize = 1 << 20;
-const BULK: usize = 256 * MIB;
 const CHUNK: usize = 64 << 10;
 const COLD: usize = 5;
 const WARM: usize = 20;
@@ -180,9 +178,9 @@ async fn bulk_until_done<D: Dialer>(dialer: &D, link: &D::Link, stop: &AtomicBoo
     Ok(sent)
 }
 
-/// Every scenario, in order. Each measurement gets a link of its own, formed by an echo before it starts, so that
-/// setup is not in its timing.
-pub async fn dial_all<D: Dialer>(dialer: &D, pair: &str, sink: &dyn Fn(String)) -> io::Result<()> {
+/// Every scenario, in order, with `bulk` bytes in each bulk transfer. Each measurement gets a link of its own, formed
+/// by an echo before it starts, so that setup is not in its timing.
+pub async fn dial_all<D: Dialer>(dialer: &D, pair: &str, bulk: usize, sink: &dyn Fn(String)) -> io::Result<()> {
     let out = Out { pair, sink };
 
     let mut cold = Vec::with_capacity(COLD);
@@ -206,22 +204,22 @@ pub async fn dial_all<D: Dialer>(dialer: &D, pair: &str, sink: &dyn Fn(String)) 
     let link = dialer.fresh().await?;
     first_echo(dialer, &link).await?;
     let start = Instant::now();
-    upload(dialer, &link, BULK).await?;
-    out.line("bulk_up", throughput(BULK, start.elapsed().as_secs_f64()));
+    upload(dialer, &link, bulk).await?;
+    out.line("bulk_up", throughput(bulk, start.elapsed().as_secs_f64()));
     dialer.close(link).await;
 
     let link = dialer.fresh().await?;
     first_echo(dialer, &link).await?;
     let start = Instant::now();
-    let got = download(dialer, &link, BULK).await?;
+    let got = download(dialer, &link, bulk).await?;
     out.line("bulk_down", throughput(got, start.elapsed().as_secs_f64()));
     dialer.close(link).await;
 
     let link = dialer.fresh().await?;
     first_echo(dialer, &link).await?;
     let start = Instant::now();
-    try_join_all((0..4).map(|_| upload(dialer, &link, BULK / 4))).await?;
-    out.line("bulk_4x64", throughput(BULK, start.elapsed().as_secs_f64()));
+    try_join_all((0..4).map(|_| upload(dialer, &link, bulk / 4))).await?;
+    out.line("bulk_4x64", throughput(bulk, start.elapsed().as_secs_f64()));
     dialer.close(link).await;
 
     let link = dialer.fresh().await?;

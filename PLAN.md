@@ -648,12 +648,12 @@ direct and relay-only). Decisions:
   - warm: after the link is up, 20 more streams, timed the same way.
   - path: `Endpoint::path`, after the warm streams.
   - 256 MiB up and down on one stream, and 4 × 64 MiB up at once. Throughput is decimal MB/s, timed until the peer's
-    acknowledgement.
+    acknowledgement. On metered links, `--bulk-mib` (page: `bulk`) shrinks each transfer; lines carry their `bytes`.
   - 1,000 100-byte echoes, paced 5 ms apart, idle and then while a sink takes 64 KiB chunks on another stream.
 - **One link per measurement.** Each measurement gets a link of its own, formed by an echo before it starts, so that
   setup is not in its timing.
-- **Peak RSS.** Each native process reports its own `VmHWM`; a server's is read before the harness stops it. Browsers
-  have no RSS figure.
+- **Peak RSS.** Each native process on Linux reports its own `VmHWM`, and `null` elsewhere; a server's is read before
+  the harness stops it. Browsers have no RSS figure.
 - **Environment.** `bench-local.sh` records the load average (1, 5, 15 minutes) before and after each run, and
   `net.core.rmem_max`. Socket buffers matter (spike 2), so the report states them.
 - **Hosted page.** `.github/workflows/pages.yml` publishes the page to https://spoj.github.io/letmetalk/ from main, for

@@ -36,6 +36,9 @@ enum Command {
         peer: PublicKey,
         #[arg(long)]
         pair: String,
+        /// MiB in each bulk transfer.
+        #[arg(long, default_value_t = 256)]
+        bulk_mib: usize,
     },
     #[cfg(feature = "iroh")]
     IrohRelay {
@@ -60,6 +63,9 @@ enum Command {
         relay: Option<iroh::RelayUrl>,
         #[arg(long)]
         pair: String,
+        /// MiB in each bulk transfer.
+        #[arg(long, default_value_t = 256)]
+        bulk_mib: usize,
     },
 }
 
@@ -84,21 +90,21 @@ async fn main() -> io::Result<()> {
     match Cli::parse().command {
         Command::Pubkey { key } => println!("{}", read_key(&key)?.public()),
         Command::Serve { url, key } => serve(&url, &read_key(&key)?, &print).await?,
-        Command::Dial { url, key, peer, pair } => {
+        Command::Dial { url, key, peer, pair, bulk_mib } => {
             let dial = Dial { url, key: read_key(&key)?, peer };
-            letmetalk_bench::dial_all(&dial, &pair, &print).await?;
-            print(serde_json::json!({ "pair": pair, "scenario": "rss", "peak_rss_kib": peak_rss_kib()? }).to_string());
+            letmetalk_bench::dial_all(&dial, &pair, bulk_mib << 20, &print).await?;
+            print(serde_json::json!({ "pair": pair, "scenario": "rss", "peak_rss_kib": peak_rss_kib().ok() }).to_string());
         }
         #[cfg(feature = "iroh")]
         Command::IrohRelay { listen } => letmetalk_bench::iroh::relay(listen).await?,
         #[cfg(feature = "iroh")]
         Command::IrohServe { key, relay } => letmetalk_bench::iroh::serve(&iroh_key(&key)?, relay, &print).await?,
         #[cfg(feature = "iroh")]
-        Command::IrohDial { key, addr, relay, pair } => {
+        Command::IrohDial { key, addr, relay, pair, bulk_mib } => {
             let addr = serde_json::from_str(&std::fs::read_to_string(addr)?).map_err(io::Error::other)?;
             let dial = letmetalk_bench::iroh::Dial { key: iroh_key(&key)?, addr, relay };
-            letmetalk_bench::dial_all(&dial, &pair, &print).await?;
-            print(serde_json::json!({ "pair": pair, "scenario": "rss", "peak_rss_kib": peak_rss_kib()? }).to_string());
+            letmetalk_bench::dial_all(&dial, &pair, bulk_mib << 20, &print).await?;
+            print(serde_json::json!({ "pair": pair, "scenario": "rss", "peak_rss_kib": peak_rss_kib().ok() }).to_string());
         }
     }
     Ok(())
