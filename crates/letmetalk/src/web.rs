@@ -17,6 +17,8 @@ use futures::lock::Mutex as AsyncMutex;
 use js_sys::{Array, ArrayBuffer, Promise, Uint8Array};
 #[cfg(feature = "stats")]
 use js_sys::{Map, Reflect, try_iter};
+#[cfg(feature = "stats")]
+use std::time::Duration;
 use send_wrapper::SendWrapper;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::{Closure, JsValue};
@@ -321,7 +323,7 @@ impl Peer for Web {
             Some(Path {
                 local: candidate("localCandidateId")?,
                 remote: candidate("remoteCandidateId")?,
-                rtt: std::time::Duration::from_secs_f64(field(&pair, "currentRoundTripTime")?.as_f64()?),
+                rtt: Duration::from_secs_f64(field(&pair, "currentRoundTripTime")?.as_f64()?),
             })
         })
     }
