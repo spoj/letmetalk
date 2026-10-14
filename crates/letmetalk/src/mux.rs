@@ -383,31 +383,37 @@ impl Mux {
         Ok(())
     }
 
-    /// Grants credit to each stream. Each keeps its first 16 KiB outside the budget; above that, streams share what
-    /// the link's budget has free. A grant goes out only once the shortfall is a full chunk.
+    /// Grants credit to each stream. Each keeps its first 16 KiB outside the budget. Above that, each stream that is
+    /// short by a full chunk gets an equal share of what the link's budget has free. A grant under a chunk is not sent,
+    /// and its share stays free for the next grant.
     fn grant(&self, st: &mut State) {
         let above = |s: &IoState| s.outstanding().saturating_sub(FIRST_CREDIT);
         let used: usize = st.streams.values().map(|io| above(&io.state())).sum();
-        let mut free = self.budget.saturating_sub(used);
-        for (&n, io) in &st.streams {
-            let mut s = io.state();
-            // Control and lanes are not ordered against each other, so a grant must not outrun the Open of a stream
-            // this side opened. The peer's first frame on it shows that the Open arrived.
+        let free = self.budget.saturating_sub(used);
+        // Control and lanes are not ordered against each other, so a grant must not outrun the Open of a stream
+        // this side opened. The peer's first frame on it shows that the Open arrived.
+        let wanting = |io: &Io, s: &IoState| {
             if s.failed || s.remote_finished || (io.own() && s.received == 0) {
-                continue;
+                return None;
             }
             let want = if s.accepted { ACCEPTED_CREDIT } else { FIRST_CREDIT };
-            if want.saturating_sub(s.outstanding()) < CHUNK {
+            (want.saturating_sub(s.outstanding()) >= CHUNK).then_some(want)
+        };
+        let waiting = st.streams.values().filter(|io| wanting(io, &io.state()).is_some()).count();
+        let share = free / waiting.max(1);
+        for (&n, io) in &st.streams {
+            let mut s = io.state();
+            let Some(want) = wanting(io, &s) else {
+                continue;
+            };
+            let floor = FIRST_CREDIT.saturating_sub(s.outstanding());
+            let extra = want.saturating_sub(s.outstanding() + floor).min(share);
+            let grant = floor + extra;
+            if grant < CHUNK {
                 continue;
             }
-            let floor = FIRST_CREDIT.saturating_sub(s.outstanding());
-            let extra = want.saturating_sub(s.outstanding() + floor).min(free);
-            free -= extra;
-            let grant = floor + extra;
-            if grant > 0 {
-                s.granted += grant as u64;
-                let _ = self.control.unbounded_send(frame(CREDIT, n, &(grant as u32).to_be_bytes()));
-            }
+            s.granted += grant as u64;
+            let _ = self.control.unbounded_send(frame(CREDIT, n, &(grant as u32).to_be_bytes()));
         }
     }
 
@@ -574,6 +580,35 @@ mod tests {
     /// Sends a frame from B on `channel`.
     async fn send_back(p: &Pair, channel: u32, bytes: Vec<u8>) {
         p.b_peer.send(channel, bytes).await.unwrap();
+    }
+
+    /// Adds `n` accepted streams to B's link, each short of credit, and grants them.
+    fn waiting_streams(p: &Pair, n: u32) -> Vec<Arc<Io>> {
+        let mut st = p.b.state.lock().unwrap();
+        let ios: Vec<Arc<Io>> = (0..n)
+            .map(|i| {
+                let io = Arc::new(Io::new(2 * i, false));
+                io.state().accepted = true;
+                st.streams.insert(2 * i, io.clone());
+                io
+            })
+            .collect();
+        p.b.grant(&mut st);
+        ios
+    }
+
+    #[tokio::test]
+    async fn streams_short_of_credit_share_the_budget_evenly() {
+        let p = pair_with(RELAYED_BUDGET).await;
+        for io in waiting_streams(&p, 4) {
+            assert_eq!(io.state().granted, (FIRST_CREDIT + RELAYED_BUDGET / 4) as u64);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_share_under_a_chunk_is_not_granted() {
+        let p = pair_with(RELAYED_BUDGET).await;
+        assert!(waiting_streams(&p, 32).iter().all(|io| io.state().granted == FIRST_CREDIT as u64));
     }
 
     #[tokio::test]

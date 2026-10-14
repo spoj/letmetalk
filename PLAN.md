@@ -350,7 +350,9 @@ impl WsSignal {  // feature "ws"
     - The reader grants more: up to 16 KiB until the app accepts a stream, then up to 1 MiB, and more as the app reads.
       A grant goes out only once it is at least 16 KiB, so small reads don't flood the control channel.
     - Each stream keeps its first 16 KiB outside the budget, so every stream can always progress. Above that, streams
-      share the link's budget: 4 MiB for a Direct link, 256 KiB for a Relayed one.
+      share the link's budget: 4 MiB for a Direct link, 256 KiB for a Relayed one. Each grant gives every stream that is
+      short by a full chunk an equal share of what the budget has free. A share too small for a chunk is not granted,
+      and stays free.
   - **Enforcement.** The sender never sends past its credit. A message past it fails the link, so what a peer can make
     an endpoint hold is bounded by budget + 16 KiB × open streams. A peer whose credit would pass 1 MiB fails the link.
     Byte counts are 64-bit, so a stream on a 32-bit target may pass 4 GiB.
