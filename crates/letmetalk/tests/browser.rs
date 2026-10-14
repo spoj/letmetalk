@@ -165,3 +165,14 @@ async fn refuses_plain_ws_to_a_remote_host() {
     let signal = WsSignal::new("ws://example.com/ws", &SecretKey::generate());
     assert!(within(signal.recv()).await.is_none());
 }
+
+/// Forwarder frames keep an idle login alive, so a carrier idle for 20 s still dials.
+#[wasm_bindgen_test]
+async fn idle_browser_carrier_still_dials() {
+    let key = SecretKey::from_bytes([0x44; 32]);
+    let signal = Arc::new(WsSignal::new(env!("LETMETALK_TEST_SIGNAL"), &key));
+    logged_in(&signal).await;
+    sleep(Duration::from_secs(20)).await;
+    let dialer = Endpoint::new(key, Forwarded(signal), |_| Admit::Direct);
+    dial_and_echo(&dialer, echo_key()).await;
+}
