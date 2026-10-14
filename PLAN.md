@@ -732,11 +732,11 @@ Not in the trial:
 ## Risks
 
 - **webrtc-rs can lose a stream's last messages.** Found by the bench. A channel's close, when processed, drops the
-  messages still queued on that channel. Closes now wait 200 ms after the last byte is acknowledged or buffered, and a
-  stream the peer has not finished fails only 3 s after its channel closes, which covers SCTP's 1 s minimum
-  retransmission timeout. Neither is a proof. Sequential streams on one native loopback link still failed once in
-  about 40 to 75 before the drain, and `many_streams.rs` (ignored) reproduces that. The 3 s also delays a refused link's
-  streams. This is the first thing to report upstream.
+  messages still queued on that channel. Two measures follow. Closes wait 200 ms after the last byte is acknowledged
+  or buffered. A stream the peer has not finished fails only 3 s after its channel closes, which covers SCTP's 1 s
+  minimum retransmission timeout. Before the drain, sequential streams on one native loopback link failed after about
+  40 to 75 of them; with it, 200 sequential streams passed in 6 of 6 runs (`many_streams.rs`). That is loopback
+  evidence only, and the 3 s also delays a refused link's streams. Report the cause upstream.
 - **Our own protocol.**
   - The Noise pattern, the ML-KEM secret in the PSK slot and the nonce layout are ours to get right. The primitives
     come from snow and RustCrypto, not from us.
