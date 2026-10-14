@@ -1,5 +1,5 @@
-//! Runs a forwarder on loopback and a native echo endpoint on it, for the browser tests. Prints the echo's key.
-//! Usage: `browser_helper <port>`.
+//! Runs a forwarder on a free loopback port and a native echo endpoint on it, for the browser tests. Prints the port
+//! and the echo's key, on one line.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -19,11 +19,6 @@ fn turn() -> Turn {
 
 #[tokio::main]
 async fn main() {
-    let port: u16 = std::env::args()
-        .nth(1)
-        .expect("a port")
-        .parse()
-        .expect("a port number");
     let forwarder = Forwarder::new(Config {
         host: "127.0.0.1".into(),
         allowlist: None,
@@ -31,7 +26,8 @@ async fn main() {
         stranger_turn: turn(),
         turn_ttl: Duration::from_secs(3600),
     });
-    let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
     let app = forwarder
         .router()
         .into_make_service_with_connect_info::<SocketAddr>();
@@ -40,7 +36,7 @@ async fn main() {
     let key = SecretKey::from_bytes([0x42; 32]);
     let signal = WsSignal::new(&format!("ws://127.0.0.1:{port}/ws"), &key);
     let endpoint = Endpoint::new(key.clone(), signal, |_| Admit::Direct);
-    println!("{}", key.public());
+    println!("{port} {}", key.public());
     let browser = SecretKey::from_bytes([0x43; 32]).public();
     let dialer = endpoint.clone();
     tokio::spawn(async move {
