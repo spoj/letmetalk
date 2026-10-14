@@ -325,9 +325,9 @@ impl WsSignal {  // feature "ws"
 - **Numbers.** Streams are numbered by letmetalk, not by channel.
   - The dialer's numbers are even, from 0, and the accepter's odd, from 1. A number is never reused on a link, and
     running out of 32-bit numbers fails an open with `ResourceBusy`.
-  - An `Open` from the peer must have the peer's parity and be unseen. Opens on different lanes can arrive out of order,
-    so the check uses a window of 1,024 numbers below the highest one seen, as DTLS does for records (RFC 6347). A
-    number below the window is refused as reused.
+  - A lane is in order, so the peer's `Open`s on it rise. An `Open` from the peer must have the peer's parity and a
+    number above the last one opened on its lane. Lanes are not ordered against each other, so a late `Open` on a
+    stalled lane is still accepted while the others run ahead.
   - Any failure fails the link. Without these checks, a replayed `Open` could make a stale stream look new.
 - **Frames.** Each frame is a kind (1 byte), a stream number (4 bytes, big-endian) and a body.
   - On a lane: `Open` (the protocol name, at most 255 bytes), `Data` (at most 16 KiB), `Finish`, `Reset`. Each must
@@ -335,7 +335,7 @@ impl WsSignal {  // feature "ws"
   - On the control channel: `Hello`, then `Credit(stream, bytes)`. `Hello` is sealed with the session key, and nothing
     else on the control channel is sealed.
   - A stream ends when both sides have sent `Finish`, or either has sent `Reset`. A frame or `Credit` for a stream that
-    has ended is ignored. A number below the window counts as ended.
+    has ended is ignored. A number at or below its lane's last `Open` counts as ended.
   - These fail the link: a frame for a number never opened that is not an `Open`, including a `Credit` for one; a frame
     on the wrong lane; `Data` after the peer's `Finish`; and anything malformed.
 - **Credit before Open.** The control channel and the lanes are separate channels, so their order is not kept. A side

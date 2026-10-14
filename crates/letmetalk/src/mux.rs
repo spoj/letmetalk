@@ -18,7 +18,6 @@ use crate::stream::{Io, IoState, Stream};
 pub(crate) const CHUNK: usize = 16 * 1024;
 pub(crate) const FIRST_CREDIT: usize = 16 * 1024;
 pub(crate) const ACCEPTED_CREDIT: usize = 1 << 20;
-const WINDOW: u64 = 1024;
 const MAX_STREAMS: usize = 128;
 const MAX_WAITING: usize = 16;
 const MAX_PROTOCOL: usize = 255;
@@ -54,33 +53,6 @@ pub(crate) fn reset() -> io::Error {
     io::Error::new(io::ErrorKind::ConnectionReset, "stream reset")
 }
 
-/// The stream numbers the peer has opened. Each must have the peer's parity and be new, within a window of
-/// 1,024 below the highest one seen. Opens on different lanes can arrive out of order, so the window is needed.
-#[derive(Default)]
-struct Numbers {
-    highest: u64,
-    seen: BTreeSet<u32>,
-}
-
-impl Numbers {
-    fn admit(&mut self, number: u32, parity: u32) -> io::Result<()> {
-        if number % 2 != parity {
-            return Err(io::Error::other("stream number of our parity"));
-        }
-        if u64::from(number) + WINDOW <= self.highest || !self.seen.insert(number) {
-            return Err(io::Error::other("stream number reused"));
-        }
-        self.highest = self.highest.max(u64::from(number));
-        self.seen.retain(|&n| u64::from(n) + WINDOW > self.highest);
-        Ok(())
-    }
-
-    /// Whether `number` is in the window and was never opened.
-    fn unseen(&self, number: u32) -> bool {
-        u64::from(number) + WINDOW > self.highest && !self.seen.contains(&number)
-    }
-}
-
 pub(crate) enum Incoming {
     Hello,
     Stream(Stream),
@@ -94,7 +66,8 @@ struct Lane {
 
 struct State {
     streams: HashMap<u32, Arc<Io>>,
-    numbers: Numbers,
+    /// The last stream number the peer opened on each lane. A lane is in order, so its numbers rise.
+    last: [Option<u32>; LANES as usize],
     next: u64,
     channels: BTreeSet<u32>,
     hello_sent: bool,
@@ -181,7 +154,7 @@ impl Mux {
             control,
             state: Mutex::new(State {
                 streams: HashMap::new(),
-                numbers: Numbers::default(),
+                last: [None; LANES as usize],
                 next: u64::from(!dialer),
                 channels: BTreeSet::new(),
                 hello_sent: false,
@@ -348,23 +321,34 @@ impl Mux {
     }
 
     /// The stream of a frame: live, or ended (`None`, which ignores the frame). A number never opened fails the
-    /// link. Ours are opened in order, and the peer's are judged by the window.
+    /// link. Ours are opened in order, and the peer's are judged by its lane's last Open.
     fn lookup(&self, st: &State, n: u32) -> io::Result<Option<Arc<Io>>> {
         if let Some(io) = st.streams.get(&n) {
             return Ok(Some(io.clone()));
         }
         let ours = n % 2 != u32::from(self.dialer);
-        let unseen = if ours { u64::from(n) >= st.next } else { st.numbers.unseen(n) };
-        if unseen {
-            Err(io::Error::other("frame for a stream never opened"))
+        let opened = if ours {
+            u64::from(n) < st.next
         } else {
+            st.last[lane_of(n) as usize - 1].is_some_and(|last| n <= last)
+        };
+        if opened {
             Ok(None)
+        } else {
+            Err(io::Error::other("frame for a stream never opened"))
         }
     }
 
     fn open_from_peer(self: &Arc<Self>, st: &mut State, n: u32, body: &[u8]) -> io::Result<Option<Incoming>> {
         let protocol = String::from_utf8(body.to_vec()).map_err(io::Error::other)?;
-        st.numbers.admit(n, u32::from(self.dialer))?;
+        if n % 2 != u32::from(self.dialer) {
+            return Err(io::Error::other("stream number of our parity"));
+        }
+        let last = &mut st.last[lane_of(n) as usize - 1];
+        if last.is_some_and(|last| n <= last) {
+            return Err(io::Error::other("stream number reused"));
+        }
+        *last = Some(n);
         let peers = st.streams.values().filter(|io| !io.own()).count();
         let waiting = st.streams.values().filter(|io| !io.own() && !io.state().accepted).count();
         if peers >= MAX_STREAMS || waiting >= MAX_WAITING {
@@ -592,20 +576,6 @@ mod tests {
         p.b_peer.send(channel, bytes).await.unwrap();
     }
 
-    #[test]
-    fn numbers_need_the_peers_parity_and_must_be_new() {
-        let mut numbers = Numbers::default();
-        assert!(numbers.admit(3, 0).is_err());
-        assert!(numbers.admit(u32::MAX, 0).is_err());
-        numbers.admit(2, 0).unwrap();
-        assert!(numbers.admit(2, 0).is_err());
-        numbers.admit(2 + 2 * WINDOW as u32, 0).unwrap();
-        assert!(numbers.admit(2, 0).is_err());
-        assert!(numbers.admit(4, 0).is_err());
-        assert!(numbers.admit(2 + WINDOW as u32, 0).is_err());
-        numbers.admit(2 + 2 * WINDOW as u32 - 2, 0).unwrap();
-    }
-
     #[tokio::test]
     async fn echo_and_finish_both_ways() {
         let p = pair().await;
@@ -674,6 +644,30 @@ mod tests {
         let mut buf = [0; 2];
         two.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"hi");
+    }
+
+    #[tokio::test]
+    async fn late_open_on_a_stalled_lane_is_accepted_after_the_others_run_ahead() {
+        let mut p = pair().await;
+        for n in [4000, 4004, 4006] {
+            send_raw(&p, lane_of(n), frame(OPEN, n, b"ahead")).await;
+        }
+        send_raw(&p, lane_of(2), frame(OPEN, 2, b"late")).await;
+        let mut streams = Vec::new();
+        for _ in 0..4 {
+            streams.push(p.accepts.next().await.unwrap());
+        }
+        let protocols: Vec<&str> = streams.iter().map(|s| s.protocol()).collect();
+        assert_eq!(protocols, ["ahead", "ahead", "ahead", "late"]);
+        assert!(!p.b_task.is_finished());
+    }
+
+    #[tokio::test]
+    async fn open_at_or_below_its_lanes_last_fails_the_link() {
+        let p = pair().await;
+        send_raw(&p, lane_of(4000), frame(OPEN, 4000, b"ahead")).await;
+        send_raw(&p, lane_of(0), frame(OPEN, 0, b"behind")).await;
+        assert!(p.b_task.await.unwrap().is_err());
     }
 
     #[tokio::test]
