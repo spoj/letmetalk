@@ -36,11 +36,11 @@ pub(crate) enum Event {
     Closed(u32),
 }
 
-/// One WebRTC peer connection, from the native webrtc-rs backend or the in-memory fake.
+/// One WebRTC peer connection: the native webrtc-rs backend, the browser's own, or the in-memory fake.
 pub(crate) trait Peer: Send + Sync {
     /// Creates the control channel and returns the offer, with candidates arriving as events.
     fn offer(&self) -> BoxFuture<'_, io::Result<String>>;
-    /// Applies an offer, creates the control channel and returns the answer.
+    /// Applies an offer and returns the answer.
     fn answer(&self, offer: &str) -> BoxFuture<'_, io::Result<String>>;
     fn accept(&self, answer: &str) -> BoxFuture<'_, io::Result<()>>;
     fn candidate(&self, candidate: String) -> BoxFuture<'_, io::Result<()>>;

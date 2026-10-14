@@ -1,6 +1,6 @@
 mod common;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::*;
 use ed25519_dalek::VerifyingKey;
@@ -95,7 +95,7 @@ async fn refuses_a_65th_socket_from_one_ip() {
 }
 
 #[tokio::test]
-async fn sends_an_alive_frame_with_each_ping() {
+async fn sends_alive_frames_about_each_ping() {
     let url = spawn(None, no_turn(), no_turn()).await;
     let (mut ws, _) = connect_async(&url).await.unwrap();
     let Some(Ok(Message::Binary(challenge))) = ws.next().await else {
@@ -103,13 +103,18 @@ async fn sends_an_alive_frame_with_each_ping() {
     };
     let login = wire::answer(&key(1), HOST, &challenge).unwrap();
     ws.send(Message::Binary(login.to_vec().into())).await.unwrap();
-    let alive = tokio::time::timeout(Duration::from_secs(6), async {
+    let mut alive = Vec::new();
+    tokio::time::timeout(Duration::from_secs(12), async {
         while let Some(Ok(message)) = ws.next().await {
             if matches!(&message, Message::Binary(frame) if matches!(Down::decode(frame), Ok(Down::Alive))) {
-                return true;
+                alive.push(Instant::now());
+                if alive.len() == 2 {
+                    return;
+                }
             }
         }
-        false
-    });
-    assert!(alive.await.expect("an alive frame within 6 s"));
+    })
+    .await
+    .expect("two alive frames within 12 s");
+    assert!(alive[1] - alive[0] >= Duration::from_secs(4), "alive frames {:?} apart", alive[1] - alive[0]);
 }

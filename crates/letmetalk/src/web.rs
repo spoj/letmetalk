@@ -9,14 +9,12 @@ use std::future::Future;
 use std::io;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::lock::Mutex as AsyncMutex;
-use js_sys::{Array, Promise, Uint8Array};
+use js_sys::{Array, ArrayBuffer, Promise, Uint8Array};
 #[cfg(feature = "stats")]
 use js_sys::{Map, Reflect, try_iter};
 use n0_future::time::sleep;
@@ -36,15 +34,9 @@ use crate::backend::Path;
 use crate::backend::{CLOSE_DRAIN, Event, Peer};
 
 const CONTROL: u32 = 0;
-/// Sends wait while a channel holds this many bytes, and resume once it has drained to half.
-const SEND_BUFFER: u32 = 1 << 20;
 
 pub(crate) fn js(e: JsValue) -> io::Error {
     io::Error::other(format!("{e:?}"))
-}
-
-fn gone() -> io::Error {
-    io::Error::new(io::ErrorKind::NotConnected, "no such channel")
 }
 
 /// Awaits a promise. The promise is consumed here, and the future is `Send` because it only holds a `SendWrapper`.
@@ -73,17 +65,14 @@ fn description(kind: RtcSdpType, sdp: &str) -> RtcSessionDescriptionInit {
     init
 }
 
-type Room = Rc<RefCell<Option<oneshot::Sender<()>>>>;
 type Lanes = Rc<RefCell<HashMap<u32, Lane>>>;
 
 /// A data channel and its handlers. Dropping it detaches the handlers first, so no callback can reach a freed closure.
 struct Lane {
     dc: RtcDataChannel,
-    room: Room,
     _open: Closure<dyn FnMut(JsValue)>,
     _message: Closure<dyn FnMut(MessageEvent)>,
     _closed: Closure<dyn FnMut(JsValue)>,
-    _low: Closure<dyn FnMut(JsValue)>,
 }
 
 impl Drop for Lane {
@@ -91,39 +80,33 @@ impl Drop for Lane {
         self.dc.set_onopen(None);
         self.dc.set_onmessage(None);
         self.dc.set_onclose(None);
-        self.dc.set_onbufferedamountlow(None);
     }
 }
 
-/// Wires a channel's events into the peer's queue. Its numbers are letmetalk's, from the label.
+/// Wires a channel's events into the peer's queue. Its numbers are letmetalk's, from the label. Only binary messages
+/// are letmetalk's; a text message fails the link.
 fn attach(events: &UnboundedSender<Event>, lanes: &Lanes, n: u32, dc: RtcDataChannel) {
     dc.set_binary_type(RtcDataChannelType::Arraybuffer);
-    dc.set_buffered_amount_low_threshold(SEND_BUFFER / 2);
-    let room: Room = Rc::default();
     let tx = events.clone();
     let open = Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| {
         let _ = tx.unbounded_send(Event::Ready(n));
     });
     let tx = events.clone();
     let message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
-        let data = Uint8Array::new(&event.data()).to_vec();
-        let _ = tx.unbounded_send(Event::Message(n, data));
+        let event = match event.data().dyn_into::<ArrayBuffer>() {
+            Ok(buffer) => Event::Message(n, Uint8Array::new(&buffer).to_vec()),
+            Err(_) => Event::Failed,
+        };
+        let _ = tx.unbounded_send(event);
     });
     let tx = events.clone();
     let closed = Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| {
         let _ = tx.unbounded_send(Event::Closed(n));
     });
-    let waiting = room.clone();
-    let low = Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| {
-        if let Some(waiting) = waiting.borrow_mut().take() {
-            let _ = waiting.send(());
-        }
-    });
     dc.set_onopen(Some(open.as_ref().unchecked_ref()));
     dc.set_onmessage(Some(message.as_ref().unchecked_ref()));
     dc.set_onclose(Some(closed.as_ref().unchecked_ref()));
-    dc.set_onbufferedamountlow(Some(low.as_ref().unchecked_ref()));
-    let lane = Lane { dc, room, _open: open, _message: message, _closed: closed, _low: low };
+    let lane = Lane { dc, _open: open, _message: message, _closed: closed };
     lanes.borrow_mut().insert(n, lane);
 }
 
@@ -141,6 +124,7 @@ impl Drop for Inner {
         self.pc.set_onicecandidate(None);
         self.pc.set_onconnectionstatechange(None);
         self.pc.set_ondatachannel(None);
+        self.pc.close();
     }
 }
 
@@ -166,29 +150,14 @@ impl Inner {
         self.pc.add_ice_candidate_with_opt_rtc_ice_candidate_init(Some(&init))
     }
 
-    /// `Some` with a receiver to wait on while the channel is full. Waiting ends at `bufferedamountlow`.
-    fn full(&self, n: u32) -> io::Result<Option<oneshot::Receiver<()>>> {
-        let lanes = self.lanes.borrow();
-        let lane = lanes.get(&n).ok_or_else(gone)?;
-        if lane.dc.buffered_amount() < SEND_BUFFER {
-            return Ok(None);
-        }
-        let (tx, rx) = oneshot::channel();
-        *lane.room.borrow_mut() = Some(tx);
-        Ok(Some(rx))
-    }
-
     fn write(&self, n: u32, data: &[u8]) -> io::Result<()> {
         let lanes = self.lanes.borrow();
-        let lane = lanes.get(&n).ok_or_else(gone)?;
+        let lane = lanes.get(&n).ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no such channel"))?;
         lane.dc.send_with_u8_array(data).map_err(js)
     }
 
-    fn buffered(&self, n: u32) -> u32 {
-        self.lanes.borrow().get(&n).map_or(0, |lane| lane.dc.buffered_amount())
-    }
-
-    /// Closes channel `n` and drops its handlers. Its close event does not reach the queue.
+    /// Closes channel `n` and drops its handlers. Its close event does not reach the queue. `close` flushes what
+    /// was sent.
     fn close_lane(&self, n: u32) {
         if let Some(lane) = self.lanes.borrow_mut().remove(&n) {
             lane.dc.close();
@@ -219,7 +188,7 @@ impl Web {
             let event = match peer.connection_state() {
                 RtcPeerConnectionState::Connected => Event::Connected,
                 RtcPeerConnectionState::Disconnected => Event::Disconnected,
-                RtcPeerConnectionState::Failed | RtcPeerConnectionState::Closed => Event::Failed,
+                RtcPeerConnectionState::Failed => Event::Failed,
                 _ => return,
             };
             let _ = tx.unbounded_send(event);
@@ -305,19 +274,12 @@ impl Peer for Web {
 
     fn send(&self, channel: u32, data: Vec<u8>) -> BoxFuture<'_, io::Result<()>> {
         Box::pin(async move {
-            while let Some(drained) = self.inner.full(channel)? {
-                let _ = drained.await;
-            }
             self.inner.write(channel, &data)
         })
     }
 
-    /// Waits until the channel's send buffer is empty, then closes it.
     fn close_channel(&self, channel: u32) -> BoxFuture<'_, ()> {
         Box::pin(async move {
-            while self.inner.buffered(channel) > 0 {
-                sleep(Duration::from_millis(1)).await;
-            }
             sleep(CLOSE_DRAIN).await;
             self.inner.close_lane(channel);
         })
@@ -333,9 +295,12 @@ impl Peer for Web {
         })
     }
 
+    /// Browsers fire no event when a peer connection is closed, so `Failed` is synthesized: it wakes a run loop that
+    /// is parked in `next`, after a send or close from another task. The channels go now, since none will report.
     fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {
             let _ = self.inner.events.unbounded_send(Event::Failed);
+            self.inner.lanes.borrow_mut().clear();
             self.inner.pc.close();
         })
     }
@@ -354,8 +319,63 @@ impl Peer for Web {
             Some(Path {
                 local: candidate("localCandidateId")?,
                 remote: candidate("remoteCandidateId")?,
-                rtt: Duration::from_secs_f64(field(&pair, "currentRoundTripTime")?.as_f64()?),
+                rtt: std::time::Duration::from_secs_f64(field(&pair, "currentRoundTripTime")?.as_f64()?),
             })
         })
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use futures::FutureExt;
+    use n0_future::time::timeout;
+    use std::time::Duration;
+    use wasm_bindgen_test::*;
+
+    use super::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    async fn next_matching(peer: &Web, want: impl Fn(&Event) -> bool) -> Event {
+        loop {
+            let event = peer.next().await.unwrap();
+            if want(&event) {
+                return event;
+            }
+        }
+    }
+
+    async fn connect(a: &Web, b: &Web) {
+        let offer = a.offer().await.unwrap();
+        let answer = b.answer(&offer).await.unwrap();
+        a.accept(&answer).await.unwrap();
+        let (mut a_up, mut b_up) = (false, false);
+        while !(a_up && b_up) {
+            futures::select! {
+                event = a.next().fuse() => match event.unwrap() {
+                    Event::Candidate(c) => b.candidate(c).await.unwrap(),
+                    Event::Connected => a_up = true,
+                    _ => {}
+                },
+                event = b.next().fuse() => match event.unwrap() {
+                    Event::Candidate(c) => a.candidate(c).await.unwrap(),
+                    Event::Connected => b_up = true,
+                    _ => {}
+                },
+            }
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_text_message_fails_the_link() {
+        let a = Web::new(&configuration(&[], false)).unwrap();
+        let b = Web::new(&configuration(&[], false)).unwrap();
+        connect(&a, &b).await;
+        a.open(5).await.unwrap();
+        next_matching(&a, |e| matches!(e, Event::Ready(5))).await;
+        a.inner.lanes.borrow()[&5].dc.send_with_str("text").unwrap();
+        let next = next_matching(&b, |e| matches!(e, Event::Failed | Event::Message(..)));
+        let event = timeout(Duration::from_secs(10), next).await.expect("an event within 10 s");
+        assert!(matches!(event, Event::Failed));
     }
 }

@@ -10,6 +10,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::{Closure, JsValue};
 use web_sys::{BinaryType, MessageEvent, WebSocket};
 
+use super::wire::MAX_DOWN;
 use crate::web::js;
 
 pub(super) struct Socket {
@@ -28,7 +29,12 @@ impl Socket {
         let closed_tx = tx.clone();
         let message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
             if let Ok(buffer) = event.data().dyn_into::<ArrayBuffer>() {
-                let _ = tx.unbounded_send(Ok(Uint8Array::new(&buffer).to_vec()));
+                let frame = if buffer.byte_length() as usize > MAX_DOWN {
+                    Err(io::ErrorKind::InvalidData.into())
+                } else {
+                    Ok(Uint8Array::new(&buffer).to_vec())
+                };
+                let _ = tx.unbounded_send(frame);
             }
         });
         let closed = Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| {
@@ -44,7 +50,7 @@ impl Socket {
         })
     }
 
-    /// The next binary frame. Text is skipped; a closed socket is an error.
+    /// The next binary frame. Text is skipped; a closed or oversized socket is an error.
     pub(super) async fn recv(&mut self) -> io::Result<Vec<u8>> {
         self.frames.next().await.expect("the socket's handlers hold a sender")
     }

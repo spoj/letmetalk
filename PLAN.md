@@ -247,7 +247,6 @@ impl WsSignal {  // feature "ws"
   - On native, letmetalk lists interfaces itself (`netdev`) and binds only up, physical ones, skipping docker, veth and
     bridges, one socket per address (IPv6 link-local excluded). With no such address, it binds loopback, so peers on
     one machine still connect. webrtc-rs's interface filter is stored but never read.
-    Each channel's send buffer is capped at 1 MiB.
   - The accepter:
     - drops anything it cannot open;
     - applies `admit`, and a refusal gets no reply;
@@ -296,10 +295,10 @@ impl WsSignal {  // feature "ws"
 ### Streams
 
 - **Channels.** Each stream is one data channel, reliable and ordered, opened in band (DCEP).
-  - Native closes wait until SCTP has acknowledged what was sent, for at most 10 s. A browser's close waits until
-    `bufferedAmount` is 0, since browsers expose no acknowledgements. Either close then waits 200 ms more, so that the
-    peer drains what it holds: webrtc-rs drops a channel's queued messages when its close is processed (found by the
-    bench, which lost a sink's acknowledgement this way).
+  - Native closes wait until SCTP has acknowledged what was sent, for at most 10 s. A browser's close needs no such
+    wait: it flushes what was queued. Either close then waits 200 ms more, so that the peer drains what it holds:
+    webrtc-rs drops a channel's queued messages when its close is processed (found by the bench, which lost a sink's
+    acknowledgement this way).
   - Streams open only once the link is confirmed. That also avoids a webrtc-rs bug: a channel the answering side opens
     just after ICE connects, before SCTP is up, never opens.
   - A browser opener writes at once. A native opener waits for the peer's DCEP ack.
@@ -347,10 +346,7 @@ impl WsSignal {  // feature "ws"
       share the link's budget: 4 MiB for a Direct link, 256 KiB for a Relayed one.
   - **Enforcement.** The sender never sends past its credit. A message past it fails the link, so what a peer can make
     an endpoint hold is bounded by budget + 16 KiB × open streams. A peer whose credit would pass 1 MiB fails the link.
-  - **On native,** the sender also caps each channel's send buffer and waits on `writable()`. webrtc-rs's
-    `OnBufferedAmountLow` proved unreliable: it fired with 3 MB still queued.
-  - **In browsers,** the sender waits while `bufferedAmount` is 1 MiB or more, and resumes on `bufferedamountlow`, set
-    at 512 KiB.
+  - So no sender watches a send buffer: credit bounds what each channel holds, on both sides.
   - **Draining.** Every stream's unread data stays within its window, so letmetalk always drains the link at once.
   - **Throughput limit.** A window caps a stream at window ÷ RTT. 1 MiB covers about 80 Mbit/s at 100 ms; quinn's
     default is 1.25 MB. The bench records whether a run was limited by its window.
@@ -426,7 +422,7 @@ it later.
     and `send` fails with `NotConnected`.
 - **Liveness.**
   - The server pings every 5 s and sends frame `6` with each ping. Browsers answer pings without showing them to JS, so
-    a browser sees only `6`. Both clients count any frame as traffic. Either side treats a socket silent for 15 s as
+    a browser sees only `6`. Both clients count any binary frame as traffic. Either side treats a socket silent for 15 s as
     dead: the server closes it, and `WsSignal` reconnects.
   - Every server write times out after 10 s, so a client that never reads cannot pin its task.
   - Connect and login each have a 10 s timeout on the client, which reconnects after one.

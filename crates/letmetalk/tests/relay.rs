@@ -78,6 +78,6 @@ async fn relayed_links_carry_streams_through_turn_only() {
     tokio::spawn(serve(b));
     round_trip(&a, b_key.public()).await.unwrap();
     let log = std::fs::read_to_string(&coturn.log).unwrap();
-    let allocations = log.lines().filter(|line| line.contains("allocation new")).count();
+    let allocations = log.lines().filter(|line| line.contains("ALLOCATE processed, success")).count();
     assert!(allocations >= 2, "coturn logged {allocations} allocations:\n{log}");
 }
