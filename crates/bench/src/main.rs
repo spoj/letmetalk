@@ -51,6 +51,9 @@ enum Command {
         key: PathBuf,
         #[arg(long)]
         relay: Option<iroh::RelayUrl>,
+        /// With a relay, also use direct paths.
+        #[arg(long, requires = "relay")]
+        direct: bool,
     },
     #[cfg(feature = "iroh")]
     IrohDial {
@@ -61,6 +64,9 @@ enum Command {
         addr: PathBuf,
         #[arg(long)]
         relay: Option<iroh::RelayUrl>,
+        /// With a relay, also use direct paths.
+        #[arg(long, requires = "relay")]
+        direct: bool,
         #[arg(long)]
         pair: String,
         /// MiB in each bulk transfer.
@@ -98,11 +104,13 @@ async fn main() -> io::Result<()> {
         #[cfg(feature = "iroh")]
         Command::IrohRelay { listen } => letmetalk_bench::iroh::relay(listen).await?,
         #[cfg(feature = "iroh")]
-        Command::IrohServe { key, relay } => letmetalk_bench::iroh::serve(&iroh_key(&key)?, relay, &print).await?,
+        Command::IrohServe { key, relay, direct } => {
+            letmetalk_bench::iroh::serve(&iroh_key(&key)?, relay, direct, &print).await?
+        }
         #[cfg(feature = "iroh")]
-        Command::IrohDial { key, addr, relay, pair, bulk_mib } => {
+        Command::IrohDial { key, addr, relay, direct, pair, bulk_mib } => {
             let addr = serde_json::from_str(&std::fs::read_to_string(addr)?).map_err(io::Error::other)?;
-            let dial = letmetalk_bench::iroh::Dial { key: iroh_key(&key)?, addr, relay };
+            let dial = letmetalk_bench::iroh::Dial { key: iroh_key(&key)?, addr, relay, direct };
             letmetalk_bench::dial_all(&dial, &pair, bulk_mib << 20, &print).await?;
             print(serde_json::json!({ "pair": pair, "scenario": "rss", "peak_rss_kib": peak_rss_kib().ok() }).to_string());
         }

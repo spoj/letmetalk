@@ -1,4 +1,5 @@
-//! iroh 1.3 as the baseline: the same scenarios over its connections, direct or through a relay only.
+//! iroh 1.3 as the baseline: the same scenarios over its connections, direct on loopback, through a relay only, or
+//! with iroh's own mix of relay and direct paths.
 
 use std::io;
 use std::net::SocketAddr;
@@ -13,10 +14,12 @@ use crate::{Dialer, Route, handle};
 
 const ALPN: &[u8] = b"letmetalk-bench/1";
 
-/// Direct on loopback, or relay-only through `relay`, which is what a browser's path would be.
-async fn bind(key: &SecretKey, relay: Option<&RelayUrl>) -> io::Result<Endpoint> {
+/// Direct on loopback; or through `relay`, only through it (a browser's path) unless `direct`, which adds iroh's UDP
+/// paths and hole punching, as a native letmeknow peer runs.
+async fn bind(key: &SecretKey, relay: Option<&RelayUrl>, direct: bool) -> io::Result<Endpoint> {
     let builder = Endpoint::builder(presets::Minimal).secret_key(key.clone()).alpns(vec![ALPN.to_vec()]);
     let builder = match relay {
+        Some(url) if direct => builder.relay_mode(RelayMode::Custom(url.clone().into())),
         Some(url) => builder.relay_mode(RelayMode::Custom(url.clone().into())).clear_ip_transports(),
         None => builder.relay_mode(RelayMode::Disabled).bind_addr("127.0.0.1:0").map_err(io::Error::other)?,
     };
@@ -27,6 +30,7 @@ pub struct Dial {
     pub key: SecretKey,
     pub addr: EndpointAddr,
     pub relay: Option<RelayUrl>,
+    pub direct: bool,
 }
 
 pub struct Link {
@@ -39,7 +43,7 @@ impl Dialer for Dial {
     type Stream = Join<RecvStream, SendStream>;
 
     async fn fresh(&self) -> io::Result<Link> {
-        Ok(Link { endpoint: bind(&self.key, self.relay.as_ref()).await?, connection: OnceCell::new() })
+        Ok(Link { endpoint: bind(&self.key, self.relay.as_ref(), self.direct).await?, connection: OnceCell::new() })
     }
 
     async fn open(&self, link: &Link, protocol: &str) -> io::Result<Self::Stream> {
@@ -75,8 +79,8 @@ impl Dialer for Dial {
 }
 
 /// Serves on `key`, printing its address as JSON once it is reachable, then every stream by its protocol.
-pub async fn serve(key: &SecretKey, relay: Option<RelayUrl>, ready: &dyn Fn(String)) -> io::Result<()> {
-    let endpoint = bind(key, relay.as_ref()).await?;
+pub async fn serve(key: &SecretKey, relay: Option<RelayUrl>, direct: bool, ready: &dyn Fn(String)) -> io::Result<()> {
+    let endpoint = bind(key, relay.as_ref(), direct).await?;
     let addr = match &relay {
         Some(url) => {
             endpoint.online().await;
