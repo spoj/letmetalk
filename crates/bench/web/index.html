@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>letmetalk bench</title>
+<p id="status">loading</p>
+<pre id="out"></pre>
+<script type="module">
+  import init, { run } from "./pkg/letmetalk_bench.js";
+  const params = new URLSearchParams(location.search);
+  const role = params.get("role");
+  const status = document.getElementById("status");
+  const out = document.getElementById("out");
+  await init();
+  status.textContent = role === "serve" ? "serving" : "running";
+  try {
+    await run(role, params.get("url"), params.get("key"), params.get("peer") ?? "", params.get("pair") ?? "browser",
+      (line) => { out.textContent += line + "\n"; });
+    status.textContent = "done";
+  } catch (e) {
+    status.textContent = "failed: " + e;
+  }
+</script>
