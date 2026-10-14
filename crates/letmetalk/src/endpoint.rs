@@ -668,6 +668,13 @@ impl Endpoint {
         self.0.end(peer);
     }
 
+    /// The route of the link to `peer`, if one is up.
+    #[cfg(feature = "stats")]
+    pub async fn path(&self, peer: PublicKey) -> Option<crate::Path> {
+        let mux = self.0.state.lock().unwrap().links.get(&peer.x25519())?.up.as_ref()?.mux.clone();
+        mux.path().await
+    }
+
     pub async fn close(&self) {
         {
             let mut st = self.0.state.lock().unwrap();
@@ -687,7 +694,7 @@ impl Endpoint {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::fake;

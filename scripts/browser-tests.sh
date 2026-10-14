@@ -3,9 +3,12 @@
 set -eu
 cd "$(dirname "$0")/.."
 cargo build -q -p letmetalk-signal --example browser_helper
-target/debug/examples/browser_helper 8787 >/dev/null &
+helper_out=$(mktemp)
+"${CARGO_TARGET_DIR:-target}/debug/examples/browser_helper" > "$helper_out" &
 helper=$!
-trap 'kill "$helper"' EXIT
-LETMETALK_TEST_SIGNAL=ws://127.0.0.1:8787/ws \
-LETMETALK_TEST_ECHO=2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12 \
-cargo test -p letmetalk --target wasm32-unknown-unknown --features ws --test browser
+trap 'kill "$helper"; rm -f "$helper_out"' EXIT
+until [ -s "$helper_out" ] || ! kill -0 "$helper" 2>/dev/null; do sleep 0.1; done
+read -r port key < "$helper_out"
+export CHROMEDRIVER="$(command -v chromedriver)" WASM_BINDGEN_TEST_TIMEOUT=180
+LETMETALK_TEST_SIGNAL="ws://127.0.0.1:$port/ws" LETMETALK_TEST_ECHO="$key" \
+cargo test -p letmetalk --target wasm32-unknown-unknown --features ws --lib --test browser

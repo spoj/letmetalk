@@ -1,0 +1,46 @@
+127.0.0.1 - - [14/Oct/2026 10:00:17] "GET /index.html HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:00:47] "GET /index.html?role=serve&url=ws://127.0.0.1:18790/ws&key=52343a4f50a3135cfded023fe107eaf45f8d53129febcb25ac69bcf41ee6383e&pair=chromium HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:00:47] "GET /pkg/letmetalk_bench.js HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:00:47] "GET /pkg/letmetalk_bench_bg.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:00:47] code 404, message File not found
+127.0.0.1 - - [14/Oct/2026 10:00:47] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [14/Oct/2026 10:01:34] "GET /index.html?role=serve&url=ws://127.0.0.1:18790/ws&key=52343a4f50a3135cfded023fe107eaf45f8d53129febcb25ac69bcf41ee6383e&pair=chromium HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:01:34] "GET /pkg/letmetalk_bench.js HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:01:34] "GET /pkg/letmetalk_bench_bg.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:01:34] code 404, message File not found
+127.0.0.1 - - [14/Oct/2026 10:01:34] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [14/Oct/2026 10:01:35] "GET /index.html?role=dial&url=ws://127.0.0.1:18790/ws&key=e73e132edfa263b6f09b02b18c20e0aec2a4fafd46eeee0cd559ae76aae855cf&peer=a591fcc2bbca6fcbb29ed535c57f0b666b521e8780df33ecd548a9263c138079&pair=chromium-chromium HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:01:35] "GET /pkg/letmetalk_bench.js HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:01:35] "GET /pkg/letmetalk_bench_bg.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:01:35] code 404, message File not found
+127.0.0.1 - - [14/Oct/2026 10:01:35] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [14/Oct/2026 10:03:53] "GET /index.html?role=serve&url=ws://127.0.0.1:18790/ws&key=52343a4f50a3135cfded023fe107eaf45f8d53129febcb25ac69bcf41ee6383e&pair=chromium HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:03:53] "GET /pkg/letmetalk_bench.js HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:03:53] "GET /pkg/letmetalk_bench_bg.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:03:53] code 404, message File not found
+127.0.0.1 - - [14/Oct/2026 10:03:53] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [14/Oct/2026 10:04:41] "GET /index.html?role=serve&url=ws://127.0.0.1:18790/ws&key=52343a4f50a3135cfded023fe107eaf45f8d53129febcb25ac69bcf41ee6383e&pair=chromium HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:04:41] "GET /pkg/letmetalk_bench.js HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:04:41] "GET /pkg/letmetalk_bench_bg.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:04:41] code 404, message File not found
+127.0.0.1 - - [14/Oct/2026 10:04:41] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [14/Oct/2026 10:04:41] "GET /index.html?role=dial&url=ws://127.0.0.1:18790/ws&key=e73e132edfa263b6f09b02b18c20e0aec2a4fafd46eeee0cd559ae76aae855cf&peer=a591fcc2bbca6fcbb29ed535c57f0b666b521e8780df33ecd548a9263c138079&pair=chromium-chromium HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:04:41] "GET /pkg/letmetalk_bench.js HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:04:41] "GET /pkg/letmetalk_bench_bg.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:04:41] code 404, message File not found
+127.0.0.1 - - [14/Oct/2026 10:04:41] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [14/Oct/2026 10:06:41] "GET /index.html?role=serve&url=ws://127.0.0.1:18790/ws&key=52343a4f50a3135cfded023fe107eaf45f8d53129febcb25ac69bcf41ee6383e&pair=chromium HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:06:41] "GET /pkg/letmetalk_bench.js HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:06:41] "GET /pkg/letmetalk_bench_bg.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:06:41] code 404, message File not found
+127.0.0.1 - - [14/Oct/2026 10:06:41] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [14/Oct/2026 10:07:31] "GET /index.html?role=serve&url=ws://127.0.0.1:18790/ws&key=52343a4f50a3135cfded023fe107eaf45f8d53129febcb25ac69bcf41ee6383e&pair=chromium HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:07:31] "GET /pkg/letmetalk_bench.js HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:07:31] "GET /pkg/letmetalk_bench_bg.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:07:31] code 404, message File not found
+127.0.0.1 - - [14/Oct/2026 10:07:31] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [14/Oct/2026 10:07:31] "GET /index.html?role=dial&url=ws://127.0.0.1:18790/ws&key=e73e132edfa263b6f09b02b18c20e0aec2a4fafd46eeee0cd559ae76aae855cf&peer=a591fcc2bbca6fcbb29ed535c57f0b666b521e8780df33ecd548a9263c138079&pair=chromium-chromium HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:07:31] "GET /pkg/letmetalk_bench.js HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:07:31] "GET /pkg/letmetalk_bench_bg.wasm HTTP/1.1" 200 -
+127.0.0.1 - - [14/Oct/2026 10:07:31] code 404, message File not found
+127.0.0.1 - - [14/Oct/2026 10:07:31] "GET /favicon.ico HTTP/1.1" 404 -

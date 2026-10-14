@@ -23,11 +23,14 @@ use webrtc::peer_connection::{
     RTCIceCandidateInit, RTCIceServer, RTCIceTransportPolicy, RTCPeerConnectionIceEvent,
     RTCPeerConnectionState, RTCSessionDescription,
 };
+#[cfg(feature = "stats")]
+use webrtc::peer_connection::{RTCStatsReport, RTCStatsReportEntry, StatsSelector};
 
 use crate::IceServer;
-use crate::backend::{Event, Peer};
+use crate::backend::{CLOSE_DRAIN, Event, Peer};
+#[cfg(feature = "stats")]
+use crate::backend::Path;
 
-const SEND_BUFFER: usize = 1 << 20;
 const SOCKET_BUFFER: usize = 4 << 20;
 
 /// webrtc-rs binds its UDP sockets with the OS's default buffers, which drop packets under bulk load. This runtime
@@ -201,7 +204,6 @@ pub(crate) fn peer(ice: &[IceServer], relay_only: bool) -> BoxFuture<'static, io
             .with_handler(Arc::new(Handler(shared.clone())))
             .with_runtime(Arc::new(Buffers(default_runtime().expect("webrtc-rs has a tokio runtime"))))
             .with_udp_addrs(bind_addrs())
-            .with_data_channel_send_buffer_limit(SEND_BUFFER)
             .build()
             .await
             .map_err(other)?;
@@ -276,6 +278,7 @@ impl Peer for Native {
                     }
                     sleep(Duration::from_millis(25)).await;
                 }
+                sleep(CLOSE_DRAIN).await;
                 let _ = dc.close().await;
             }
         })
@@ -290,6 +293,38 @@ impl Peer for Native {
             let _ = self.pc.close().await;
         })
     }
+
+    #[cfg(feature = "stats")]
+    fn path(&self) -> BoxFuture<'_, Option<Path>> {
+        Box::pin(async {
+            let report = self.pc.get_stats(Instant::now(), StatsSelector::None).await;
+            let transport = report.iter().find_map(|e| match e {
+                RTCStatsReportEntry::Transport(t) => Some(t),
+                _ => None,
+            })?;
+            let RTCStatsReportEntry::IceCandidatePair(pair) = report.get(&transport.selected_candidate_pair_id)? else {
+                return None;
+            };
+            Some(Path {
+                local: candidate_type(&report, &pair.local_candidate_id)?,
+                // webrtc-rs keeps no entry for a remote candidate learnt from a check, which is peer-reflexive.
+                remote: candidate_type(&report, &pair.remote_candidate_id).unwrap_or_else(|| "prflx".into()),
+                rtt: Duration::from_secs_f64(pair.current_round_trip_time),
+            })
+        })
+    }
+}
+
+/// A pair names its candidates without the `RTCLocalIceCandidate_` and `RTCRemoteIceCandidate_` prefixes that their
+/// own stats ids carry.
+#[cfg(feature = "stats")]
+fn candidate_type(report: &RTCStatsReport, id: &str) -> Option<String> {
+    report.iter().find_map(|e| match e {
+        RTCStatsReportEntry::LocalCandidate(c) | RTCStatsReportEntry::RemoteCandidate(c) if c.stats.id.ends_with(id) => {
+            Some(c.candidate_type.to_string())
+        }
+        _ => None,
+    })
 }
 
 #[cfg(test)]

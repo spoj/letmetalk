@@ -70,7 +70,7 @@ impl FromStr for PublicKey {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) fn torsioned() -> [u8; 32] {
     (2..=255u8)
         .map(|y| {
@@ -85,7 +85,7 @@ pub(crate) fn torsioned() -> [u8; 32] {
         .unwrap()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

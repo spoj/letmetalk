@@ -8,6 +8,7 @@ use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::channel::oneshot;
 use n0_future::task::spawn;
+use n0_future::time::sleep;
 
 use crate::backend::{Event, Peer};
 use crate::handshake::Transport;
@@ -15,6 +16,7 @@ use crate::keys::PublicKey;
 use crate::stream::{Io, IoState, Stream};
 
 pub(crate) const CONTROL: u32 = 0;
+const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 const LAST: u32 = (1 << 24) - 1;
 const WINDOW: u32 = 1024;
 pub(crate) const CHUNK: usize = 16 * 1024;
@@ -186,6 +188,11 @@ impl Mux {
         &self.transport
     }
 
+    #[cfg(feature = "stats")]
+    pub(crate) async fn path(&self) -> Option<crate::backend::Path> {
+        self.peer.path().await
+    }
+
     pub(crate) fn streams(&self) -> usize {
         self.state.lock().unwrap().streams.len()
     }
@@ -224,17 +231,18 @@ impl Mux {
     /// Handles one event of the peer connection that concerns streams or the control channel.
     pub(crate) fn handle(self: &Arc<Self>, event: Event) -> io::Result<Option<Incoming>> {
         match event {
-            Event::Ready(CONTROL) => {
+            Event::Ready(CONTROL) if self.dialer => {
                 self.send_control(Plain::Hello)?;
                 Ok(None)
             }
-            Event::Opened(CONTROL) => {
+            Event::Opened(CONTROL) if !self.dialer => {
                 if std::mem::replace(&mut self.state.lock().unwrap().control_open, true) {
                     return Err(io::Error::other("control channel opened twice"));
                 }
                 self.send_control(Plain::Hello)?;
                 Ok(None)
             }
+            Event::Opened(CONTROL) => Err(io::Error::other("the dialer's control channel opened")),
             Event::Ready(n) => {
                 self.ready(n);
                 Ok(None)
@@ -382,15 +390,17 @@ impl Mux {
         }
     }
 
-    fn closed(&self, n: u32) {
-        let mut st = self.state.lock().unwrap();
-        let done = st.streams.get(&n).is_some_and(|io| {
-            let s = io.state();
-            s.local_finished && s.remote_finished
+    /// webrtc-rs can announce a channel's close before the messages sent ahead of it, so a stream the peer has not
+    /// finished fails only after a grace period, which lets those messages arrive.
+    fn closed(self: &Arc<Self>, n: u32) {
+        let mux = self.clone();
+        spawn(async move {
+            sleep(CLOSE_GRACE).await;
+            let mut st = mux.state.lock().unwrap();
+            if st.streams.get(&n).is_some_and(|io| !io.state().remote_finished) {
+                mux.fail(&mut st, n, false);
+            }
         });
-        if !done {
-            self.fail(&mut st, n, false);
-        }
     }
 
     /// Records that this side sent (`local`) or received its `Finish`. Once both have, the channel closes.
@@ -524,7 +534,7 @@ impl Mux {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::time::Duration;
 

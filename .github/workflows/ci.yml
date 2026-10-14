@@ -19,6 +19,7 @@ jobs:
       - run: rustup target add wasm32-unknown-unknown
       - run: cargo clippy -p letmetalk --target wasm32-unknown-unknown -- -D warnings
       - run: cargo clippy -p letmetalk --features ws --target wasm32-unknown-unknown -- -D warnings
+      - run: LETMETALK_TEST_SIGNAL=ws://127.0.0.1:1/ws LETMETALK_TEST_ECHO=0000000000000000000000000000000000000000000000000000000000000000 cargo clippy -p letmetalk --features ws --target wasm32-unknown-unknown --test browser -- -D warnings
       - run: cargo install --locked wasm-bindgen-cli --version 0.2.129
       - run: google-chrome --version && chromedriver --version
       - run: scripts/browser-tests.sh
