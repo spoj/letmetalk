@@ -696,4 +696,85 @@ mod tests {
         assert_eq!(bob_t.open_candidates(&last).unwrap(), b"x");
         assert!(alice_t.seal_candidates(&session, INDEX_LIMIT - 1, b"x").is_err());
     }
+
+    /// Plays the dialer A with only the accepter B's secret: the static key it sends is A's, and its static DH
+    /// returns X25519(b, A), which equals X25519(a, B). That is all `ss` in message 1 needs.
+    struct Kci([u8; 32]);
+
+    struct KciDh {
+        inner: Box<dyn Dh>,
+        claimed: [u8; 32],
+        is_static: bool,
+    }
+
+    impl Dh for KciDh {
+        fn name(&self) -> &'static str { self.inner.name() }
+        fn pub_len(&self) -> usize { 32 }
+        fn priv_len(&self) -> usize { 32 }
+        fn set(&mut self, privkey: &[u8]) {
+            self.inner.set(privkey);
+            self.is_static = true;
+        }
+        fn generate(&mut self, rng: &mut dyn Random) -> Result<(), Error> { self.inner.generate(rng) }
+        fn pubkey(&self) -> &[u8] {
+            if self.is_static { &self.claimed } else { self.inner.pubkey() }
+        }
+        fn privkey(&self) -> &[u8] { self.inner.privkey() }
+        fn dh(&self, pubkey: &[u8], out: &mut [u8]) -> Result<(), Error> {
+            if self.is_static { self.inner.dh(&self.claimed, out) } else { self.inner.dh(pubkey, out) }
+        }
+    }
+
+    impl CryptoResolver for Kci {
+        fn resolve_rng(&self) -> Option<Box<dyn Random>> { DefaultResolver.resolve_rng() }
+        fn resolve_dh(&self, choice: &DHChoice) -> Option<Box<dyn Dh>> {
+            Some(Box::new(KciDh { inner: DefaultResolver.resolve_dh(choice)?, claimed: self.0, is_static: false }))
+        }
+        fn resolve_hash(&self, choice: &HashChoice) -> Option<Box<dyn Hash>> { DefaultResolver.resolve_hash(choice) }
+        fn resolve_cipher(&self, choice: &CipherChoice) -> Option<Box<dyn Cipher>> {
+            DefaultResolver.resolve_cipher(choice)
+        }
+    }
+
+    #[test]
+    fn kci_forges_message1_but_cannot_read_message2_or_send_hello() {
+        let (alice, bob) = (SecretKey::generate(), SecretKey::generate());
+        let session = [9; 16];
+        let mut cbor = Vec::new();
+        let payload = OfferPayload { key: alice.public().to_bytes().into(), sent_ms: NOW, sdp: "forged".into() };
+        ciborium::into_writer(&payload, &mut cbor).unwrap();
+        let mut forger = Builder::with_resolver(PATTERN.parse().unwrap(), Box::new(Kci(alice.public().x25519())))
+            .local_private_key(&bob.x25519_secret())
+            .unwrap()
+            .remote_public_key(&bob.public().x25519())
+            .unwrap()
+            .prologue(&prologue(&session))
+            .unwrap()
+            .build_initiator()
+            .unwrap();
+        let mut msg = vec![0; MAX_MSG];
+        let n = forger.write_message(&cbor, &mut msg).unwrap();
+        let msg1 = frame(Kind::Offer, &session, &msg[..n]);
+
+        // Noise IK message 1 is not KCI-resistant: Bob takes it as Alice's.
+        let offer = Offer::receive(&bob, &Replay::default(), &msg1, NOW).unwrap();
+        assert_eq!(offer.dialer, alice.public());
+        assert_eq!(offer.sdp, "forged");
+        let (msg2, bob_t) = offer.answer(&mut Replay::default(), NOW, "answer").unwrap();
+
+        // Message 2's `se` needs Alice's secret or Bob's ephemeral: the forger can't read it, so has no session keys.
+        let mut out = vec![0; MAX_MSG];
+        assert!(forger.read_message(&msg2[HEADER..], &mut out).is_err());
+        assert!(!forger.is_handshake_finished());
+
+        // Nor does any Hello it could make open: one under keys from a different session, or Bob's own reflected.
+        let (other, _) = {
+            let (d, m1) = dial(&alice, &bob, NOW);
+            let (m2, t) = Offer::receive(&bob, &Replay::default(), &m1, NOW).unwrap()
+                .answer(&mut Replay::default(), NOW, "x").unwrap();
+            (d.finish(&m2).map_err(|(_, e)| e).unwrap().0, t)
+        };
+        assert!(bob_t.open(0, &other.seal(0, &[]).unwrap()).is_err());
+        assert!(bob_t.open(0, &bob_t.seal(0, &[]).unwrap()).is_err());
+    }
 }
